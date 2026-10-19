@@ -1,0 +1,21 @@
+# Zig build outputs
+.zig-cache/
+zig-out/
+
+# Compiler and IDE artifacts
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.log
+imgui.ini
+
+# Large FFmpeg runtime binaries (>100MB, keep include/ and lib/ for compiling)
+vendor/ffmpeg/bin/
+
+# Video recordings & audio dumps
+*.mkv
+*.mp4
+*.mov
+*.wav
+test_screen_recording.*

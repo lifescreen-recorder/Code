@@ -1,0 +1,20 @@
+.{
+    .name = .lifescreen,
+    .version = "0.3.0-alpha",
+    .fingerprint = 0x7915b19add83b7e6,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .cimgui_zig = .{
+            .url = "git+https://github.com/tiawl/cimgui.zig#stable",
+            .hash = "N-V-__8AAMk6AQCl1jE98f-011yv-z08Q37K1zX1x4P0E1fP",
+            .lazy = true,
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "tests",
+        "README.md",
+    },
+}
