@@ -106,7 +106,7 @@ pub fn build(b: *std.Build) void {
     // Run step
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    run_cmd.setCwd(b.path("vendor/ffmpeg/bin"));
+    run_cmd.setCwd(b.path("zig-out/bin"));
     run_cmd.addPassthruArgs();
 
     const run_step = b.step("run", "Run LifeScreen");
@@ -125,23 +125,11 @@ pub fn build(b: *std.Build) void {
         }),
     });
     unit_tests.root_module.addCSourceFile(.{
-        .file = b.path("src/encoders/ffmpeg_bridge.c"),
-        .flags = &[_][]const u8{ "-std=c11", "-O2" },
-    });
-    unit_tests.root_module.addCSourceFile(.{
         .file = b.path("src/platform/windows/wgc_bridge.c"),
         .flags = &[_][]const u8{ "-std=c11", "-O2" },
     });
-    unit_tests.root_module.addIncludePath(b.path("vendor/ffmpeg/include"));
-    unit_tests.root_module.addIncludePath(b.path("src/encoders"));
     unit_tests.root_module.addIncludePath(b.path("src/platform/windows"));
-    unit_tests.root_module.addLibraryPath(b.path("vendor/ffmpeg/lib"));
 
-    unit_tests.root_module.linkSystemLibrary("avcodec", .{});
-    unit_tests.root_module.linkSystemLibrary("avformat", .{});
-    unit_tests.root_module.linkSystemLibrary("avutil", .{});
-    unit_tests.root_module.linkSystemLibrary("swresample", .{});
-    unit_tests.root_module.linkSystemLibrary("swscale", .{});
     unit_tests.root_module.linkSystemLibrary("d3d11", .{});
     unit_tests.root_module.linkSystemLibrary("dxgi", .{});
     unit_tests.root_module.linkSystemLibrary("ole32", .{});
@@ -151,7 +139,6 @@ pub fn build(b: *std.Build) void {
     unit_tests.root_module.linkSystemLibrary("winmm", .{});
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
-    run_unit_tests.setCwd(b.path("vendor/ffmpeg/bin"));
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 }
