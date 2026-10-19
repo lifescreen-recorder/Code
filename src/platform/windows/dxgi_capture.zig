@@ -222,6 +222,64 @@ pub const IDXGIOutput1 = extern struct {
     }
 };
 
+pub const IID_IDXGIOutput5 = std.os.windows.GUID{
+    .Data1 = 0x80a07424,
+    .Data2 = 0xab52,
+    .Data3 = 0x42eb,
+    .Data4 = .{ 0x83, 0x3c, 0x0c, 0x42, 0xfd, 0x28, 0x2d, 0x98 },
+};
+
+pub const IDXGIOutput5 = extern struct {
+    vtable: *const VTable,
+
+    pub const VTable = extern struct {
+        // IUnknown (3)
+        base: d3d11.IUnknown.VTable,
+        // IDXGIObject (4)
+        SetPrivateData: ?*const anyopaque,
+        SetPrivateDataInterface: ?*const anyopaque,
+        GetPrivateData: ?*const anyopaque,
+        GetParent: ?*const anyopaque,
+        // IDXGIOutput (12)
+        GetDesc: ?*const anyopaque,
+        GetDisplayModeList: ?*const anyopaque,
+        FindClosestMatchingMode: ?*const anyopaque,
+        WaitForVBlank: ?*const anyopaque,
+        TakeOwnership: ?*const anyopaque,
+        ReleaseOwnership: ?*const anyopaque,
+        GetGammaControlCapabilities: ?*const anyopaque,
+        SetGammaControl: ?*const anyopaque,
+        GetGammaControl: ?*const anyopaque,
+        SetDisplaySurface: ?*const anyopaque,
+        GetDisplaySurfaceData: ?*const anyopaque,
+        GetFrameStatistics: ?*const anyopaque,
+        // IDXGIOutput1 (4)
+        GetDisplayModeList1: ?*const anyopaque,
+        FindClosestMatchingMode1: ?*const anyopaque,
+        GetDisplaySurfaceData1: ?*const anyopaque,
+        DuplicateOutput: ?*const anyopaque,
+        // IDXGIOutput2 (1)
+        SupportsOverlays: ?*const anyopaque,
+        // IDXGIOutput3 (1)
+        CheckOverlaySupport: ?*const anyopaque,
+        // IDXGIOutput4 (1)
+        CheckOverlayColorSpaceSupport: ?*const anyopaque,
+        // IDXGIOutput5 (1)
+        DuplicateOutput1: *const fn (
+            self: *IDXGIOutput5,
+            pDevice: *d3d11.IUnknown,
+            Flags: u32,
+            SupportedFormatsCount: u32,
+            pSupportedFormats: [*]const u32,
+            ppOutputDuplication: *?*IDXGIOutputDuplication,
+        ) callconv(.winapi) HRESULT,
+    };
+
+    pub inline fn release(self: *IDXGIOutput5) u32 {
+        return self.vtable.base.Release(@ptrCast(self));
+    }
+};
+
 pub const DXGI_ADAPTER_DESC1 = extern struct {
     Description: [128]u16,
     VendorId: u32,
@@ -373,23 +431,42 @@ pub const DxgiCapture = struct {
                     continue;
                 };
 
-                var output1_ptr: ?*anyopaque = null;
-                if (output.vtable.base.QueryInterface(@ptrCast(output), &IID_IDXGIOutput1, &output1_ptr) != S_OK or output1_ptr == null) {
-                    d3d_ctx.deinit();
-                    continue;
-                }
-                const output1: *IDXGIOutput1 = @ptrCast(@alignCast(output1_ptr.?));
-                defer _ = output1.release();
-
                 var duplication: ?*IDXGIOutputDuplication = null;
-                const hr = output1.vtable.DuplicateOutput(output1, @ptrCast(d3d_ctx.device), &duplication);
-                if (hr != S_OK or duplication == null) {
-                    std.log.scoped(.dxgi).warn("  -> DuplicateOutput returned HRESULT=0x{x} on adapter '{s}'", .{
-                        @as(u32, @bitCast(hr)),
-                        adapter_name,
-                    });
-                    d3d_ctx.deinit();
-                    continue;
+
+                // Modern 2026 Path: Try IDXGIOutput5::DuplicateOutput1 for HDR10 (BT.2020 10-bit) & WCG displays
+                var output5_ptr: ?*anyopaque = null;
+                if (output.vtable.base.QueryInterface(@ptrCast(output), &IID_IDXGIOutput5, &output5_ptr) == S_OK and output5_ptr != null) {
+                    const output5: *IDXGIOutput5 = @ptrCast(@alignCast(output5_ptr.?));
+                    defer _ = output5.release();
+                    const supported_formats = [_]u32{
+                        d3d11.DXGI_FORMAT_B8G8R8A8_UNORM,
+                        24, // DXGI_FORMAT_R10G10B10A2_UNORM (10-bit HDR)
+                        10, // DXGI_FORMAT_R16G16B16A16_FLOAT
+                    };
+                    const hr5 = output5.vtable.DuplicateOutput1(output5, @ptrCast(d3d_ctx.device), 0, supported_formats.len, &supported_formats, &duplication);
+                    if (hr5 == S_OK and duplication != null) {
+                        std.log.scoped(.dxgi).info("  -> DuplicateOutput1 (DXGI 1.5 HDR / WCG) activated on adapter '{s}'!", .{adapter_name});
+                    }
+                }
+
+                if (duplication == null) {
+                    var output1_ptr: ?*anyopaque = null;
+                    if (output.vtable.base.QueryInterface(@ptrCast(output), &IID_IDXGIOutput1, &output1_ptr) != S_OK or output1_ptr == null) {
+                        d3d_ctx.deinit();
+                        continue;
+                    }
+                    const output1: *IDXGIOutput1 = @ptrCast(@alignCast(output1_ptr.?));
+                    defer _ = output1.release();
+
+                    const hr = output1.vtable.DuplicateOutput(output1, @ptrCast(d3d_ctx.device), &duplication);
+                    if (hr != S_OK or duplication == null) {
+                        std.log.scoped(.dxgi).warn("  -> DuplicateOutput returned HRESULT=0x{x} on adapter '{s}'", .{
+                            @as(u32, @bitCast(hr)),
+                            adapter_name,
+                        });
+                        d3d_ctx.deinit();
+                        continue;
+                    }
                 }
 
                 std.log.scoped(.dxgi).info("  -> DuplicateOutput SUCCEEDED on adapter '{s}'!", .{adapter_name});

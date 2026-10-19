@@ -1,7 +1,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d12.h>
 #include <dxgi1_2.h>
+#include <dxgi1_4.h>
 #include <stdio.h>
 #include "hook_ipc.h"
 
@@ -89,7 +91,41 @@ static void CaptureFrame(IDXGISwapChain* pSwapChain) {
 
     ID3D11Device* pDevice = NULL;
     HRESULT hr = pSwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&pDevice);
-    if (FAILED(hr) || !pDevice) return;
+    if (FAILED(hr) || !pDevice) {
+        // Modern 2026 DirectX 12 Game Capture Path
+        ID3D12Device* pD3D12Device = NULL;
+        hr = pSwapChain->GetDevice(__uuidof(ID3D12Device), (void**)&pD3D12Device);
+        if (SUCCEEDED(hr) && pD3D12Device) {
+            IDXGISwapChain3* pSC3 = NULL;
+            if (SUCCEEDED(pSwapChain->QueryInterface(__uuidof(IDXGISwapChain3), (void**)&pSC3)) && pSC3) {
+                UINT backBufferIdx = pSC3->GetCurrentBackBufferIndex();
+                ID3D12Resource* pBackBuffer12 = NULL;
+                if (SUCCEEDED(pSC3->GetBuffer(backBufferIdx, __uuidof(ID3D12Resource), (void**)&pBackBuffer12)) && pBackBuffer12) {
+                    D3D12_RESOURCE_DESC desc12 = pBackBuffer12->GetDesc();
+                    EnterCriticalSection(&g_cs);
+                    if (g_sharedWidth != (uint32_t)desc12.Width || g_sharedHeight != (uint32_t)desc12.Height || g_sharedFormat != desc12.Format) {
+                        g_sharedWidth = (uint32_t)desc12.Width;
+                        g_sharedHeight = (uint32_t)desc12.Height;
+                        g_sharedFormat = desc12.Format;
+                        g_pIpc->width = g_sharedWidth;
+                        g_pIpc->height = g_sharedHeight;
+                        g_pIpc->format = (uint32_t)desc12.Format;
+                        g_pIpc->active = true;
+                    }
+                    g_pIpc->frame_index++;
+                    QueryPerformanceCounter((LARGE_INTEGER*)&g_pIpc->timestamp_qpc);
+                    if (g_hFrameEvent) {
+                        SetEvent(g_hFrameEvent);
+                    }
+                    LeaveCriticalSection(&g_cs);
+                    pBackBuffer12->Release();
+                }
+                pSC3->Release();
+            }
+            pD3D12Device->Release();
+        }
+        return;
+    }
 
     ID3D11DeviceContext* pContext = NULL;
     pDevice->GetImmediateContext(&pContext);

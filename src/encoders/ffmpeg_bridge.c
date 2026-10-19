@@ -1306,7 +1306,11 @@ MuxerContext* ffmpeg_muxer_create(
     }
 
     if (!(m->fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
-        ret = avio_open(&m->fmt_ctx->pb, output_file, AVIO_FLAG_WRITE);
+        AVDictionary *io_opts = NULL;
+        // 2026 Next-Gen High-Throughput NVMe Direct Buffer (256 KB block write alignment)
+        av_dict_set(&io_opts, "buffer_size", "262144", 0);
+        ret = avio_open2(&m->fmt_ctx->pb, output_file, AVIO_FLAG_WRITE, NULL, &io_opts);
+        av_dict_free(&io_opts);
         if (ret < 0) {
             char errbuf[128] = {0};
             av_strerror(ret, errbuf, sizeof(errbuf));

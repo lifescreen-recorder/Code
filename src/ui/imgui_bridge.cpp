@@ -1052,7 +1052,7 @@ void imgui_window_render_ui(UiState* state) {
                         int codec_count = 0;
                         if (can_h264) avail_codecs[codec_count++] = { 0, "H.264 (AVC)" };
                         if (can_hevc) avail_codecs[codec_count++] = { 1, "HEVC (H.265)" };
-                        if (can_av1)  avail_codecs[codec_count++] = { 2, "AV1" };
+                        if (can_av1)  avail_codecs[codec_count++] = { 2, "AV1 (Next-Gen 2026)" };
 
                         int current_codec_idx = 0;
                         for (int i = 0; i < codec_count; i++) {

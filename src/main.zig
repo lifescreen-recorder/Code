@@ -47,13 +47,25 @@ pub fn main() !void {
 
     var cfg = lifescreen.storage.loadFromFile(arena.allocator(), io, config_file);
 
-    // Auto-select fastest hardware encoder if on auto
-    if (caps.nvenc_h264) {
+    // Auto-select fastest hardware encoder and next-gen codec (Prioritizing AV1 on RTX 40/50, Arc, RDNA3/4)
+    if (caps.nvenc_av1 or caps.nvenc_hevc or caps.nvenc_h264) {
         cfg.encoder.preferred_backend = .nvenc;
-    } else if (caps.amf_h264) {
-        cfg.encoder.preferred_backend = .amf;
-    } else if (caps.qsv_h264) {
+        if (caps.nvenc_av1) {
+            cfg.encoder.codec = .av1;
+            log.info("Auto-selected Next-Gen Hardware AV1 (NVIDIA NVENC AV1)", .{});
+        }
+    } else if (caps.qsv_av1 or caps.qsv_hevc or caps.qsv_h264) {
         cfg.encoder.preferred_backend = .qsv;
+        if (caps.qsv_av1) {
+            cfg.encoder.codec = .av1;
+            log.info("Auto-selected Next-Gen Hardware AV1 (Intel QSV AV1)", .{});
+        }
+    } else if (caps.amf_av1 or caps.amf_hevc or caps.amf_h264) {
+        cfg.encoder.preferred_backend = .amf;
+        if (caps.amf_av1) {
+            cfg.encoder.codec = .av1;
+            log.info("Auto-selected Next-Gen Hardware AV1 (AMD AMF AV1)", .{});
+        }
     } else {
         cfg.encoder.preferred_backend = .software;
     }

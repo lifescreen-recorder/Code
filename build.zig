@@ -97,6 +97,7 @@ pub fn build(b: *std.Build) void {
     });
     hook_dll.root_module.addIncludePath(b.path("src/platform/windows/hook"));
     hook_dll.root_module.linkSystemLibrary("d3d11", .{});
+    hook_dll.root_module.linkSystemLibrary("d3d12", .{});
     hook_dll.root_module.linkSystemLibrary("dxgi", .{});
     hook_dll.root_module.linkSystemLibrary("kernel32", .{});
     hook_dll.root_module.linkSystemLibrary("user32", .{});
