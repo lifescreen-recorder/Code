@@ -122,16 +122,48 @@ jobs:
 
           # Update CHANGELOG.md
           DATE=$(date -u +'%Y-%m-%d')
-          ENTRY="## [v${NEXT_VER}] - ${DATE}
+          {
+            echo "## [v${NEXT_VER}] - ${DATE}"
+            echo ""
+            echo "### 📋 Changes & Accepted Commits:"
+            cat commits.txt
+            echo ""
+          } > new_entry.tmp
 
-### 📋 Changes & Accepted Commits:
-${COMMITS}
-"
           if [ -f "CHANGELOG.md" ]; then
-            printf "%s\n\n%s\n" "$ENTRY" "$(cat CHANGELOG.md)" > CHANGELOG.md
+            cat new_entry.tmp CHANGELOG.md > changelog_combined.tmp
+            mv changelog_combined.tmp CHANGELOG.md
           else
-            printf "# Changelog\n\n%s\n" "$ENTRY" > CHANGELOG.md
+            {
+              echo "# Changelog"
+              echo ""
+              cat new_entry.tmp
+            } > CHANGELOG.md
           fi
+          rm -f new_entry.tmp
+
+          # Generate PR description body file
+          {
+            echo "## 🤖 LifeScreen Automated Release PR"
+            echo ""
+            echo "Всі останні зміни та коміти, прийняті в основну гілку \`main\`, автоматично зібрано для випуску наступного релізу **v${NEXT_VER}**."
+            echo ""
+            echo "### 📝 Список прийнятих комітів (Changelog):"
+            cat commits.txt
+            echo ""
+            echo "---"
+            echo "### 📦 Бінарні пакунки, які будуть автоматично зібрані після злиття:"
+            echo "- 🪟 **Windows**: \`lifescreen-windows-x64-installer.exe\` (Інсталятор) та \`lifescreen-windows-x64-portable.zip\` (Portable)"
+            echo "- 🐧 **Linux**: \`lifescreen-linux-x64.deb\` (Debian/Ubuntu), \`lifescreen-linux-x64.rpm\` (Fedora/RHEL), \`lifescreen-linux-x64.tar.gz\`"
+            echo "- 🍏 **macOS**: \`lifescreen-macos-arm64.tar.gz\` (Apple Silicon)"
+            echo "- 🛡️ **Безпека**: \`sha256_checksums.txt\` (Контрольні суми)"
+            echo ""
+            echo "---"
+            echo "> ℹ️ **Інструкція для розробника:**"
+            echo "> 1. Перегляньте перелік комітів та оновлений \`CHANGELOG.md\`."
+            echo "> 2. Натисніть кнопку **\"Merge pull request\"**."
+            echo "> 3. Бот автоматично створить тег **\`v${NEXT_VER}\`**, запустить кросплатформовий білд на Windows, Linux і Mac та опублікує офіційний реліз на GitHub!"
+          } > pr_body.md
 
       - name: Create or Update Pull Request
         if: steps.release_data.outputs.has_commits == 'true'
@@ -142,29 +174,12 @@ ${COMMITS}
           base: main
           title: "🚀 Release v${{ steps.release_data.outputs.next_version }}"
           commit-message: "chore(release): v${{ steps.release_data.outputs.next_version }}"
+          author: "Baneronetwo <BANSAFAn@users.noreply.github.com>"
+          committer: "GitHub Actions <actions@github.com>"
           labels: |
             autorelease: pending
             release
-          body: |
-            ## 🤖 LifeScreen Automated Release PR
-
-            Всі останні зміни та коміти, прийняті в основну гілку `main`, автоматично зібрано для випуску наступного релізу **v${{ steps.release_data.outputs.next_version }}**.
-
-            ### 📝 Список прийнятих комітів (Changelog):
-            $(cat commits.txt)
-
-            ---
-            ### 📦 Бінарні пакунки, які будуть автоматично зібрані після злиття:
-            - 🪟 **Windows**: `lifescreen-windows-x64-installer.exe` (Інсталятор) та `lifescreen-windows-x64-portable.zip` (Portable)
-            - 🐧 **Linux**: `lifescreen-linux-x64.deb` (Debian/Ubuntu), `lifescreen-linux-x64.rpm` (Fedora/RHEL), `lifescreen-linux-x64.tar.gz`
-            - 🍏 **macOS**: `lifescreen-macos-arm64.tar.gz` (Apple Silicon)
-            - 🛡️ **Безпека**: `sha256_checksums.txt` (Контрольні суми)
-
-            ---
-            > ℹ️ **Інструкція для розробника:**
-            > 1. Перегляньте перелік комітів та оновлений `CHANGELOG.md`.
-            > 2. Натисніть кнопку **"Merge pull request"**.
-            > 3. Бот автоматично створить тег **`v${{ steps.release_data.outputs.next_version }}`**, запустить кросплатформовий білд на Windows, Linux і Mac та опублікує офіційний реліз на GitHub!
+          body-path: pr_body.md
 
   # =========================================================================
   # 3. TRIGGER RELEASE ON MERGE
@@ -184,8 +199,8 @@ ${COMMITS}
           TAG: ${{ needs.check-push.outputs.version }}
         run: |
           echo "Release PR was merged! Creating tag $TAG..."
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "Baneronetwo"
+          git config user.email "BANSAFAn@users.noreply.github.com"
           git tag -a "$TAG" -m "Official Release $TAG"
           git push origin "$TAG" --force
 
