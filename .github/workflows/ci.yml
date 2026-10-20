@@ -57,14 +57,20 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path dist -Force
 
-          # 1. Portable Zip
+          # 1. Sign application executable with Publisher Certificate
+          powershell -ExecutionPolicy Bypass -File installer\sign_binaries.ps1 -FilePath zig-out\bin\lifescreen.exe
+
+          # 2. Portable Zip
           Compress-Archive -Path zig-out\bin\* -DestinationPath dist\lifescreen-windows-x64-portable.zip -Force
 
-          # 2. Build Inno Setup Installer
+          # 3. Build Inno Setup Installer
           if (-not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) {
             choco install innosetup --no-progress -y
           }
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\lifescreen_setup.iss
+
+          # 4. Sign Installer with Publisher Certificate (Baneronetwo)
+          powershell -ExecutionPolicy Bypass -File installer\sign_binaries.ps1 -FilePath dist\lifescreen-windows-x64-installer.exe
 
       - name: Upload Windows Artifacts
         uses: actions/upload-artifact@v4
