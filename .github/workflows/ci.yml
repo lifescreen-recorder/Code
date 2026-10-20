@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   # =========================================================================
-  # 1. WINDOWS BUILD & TEST (Primary native platform)
+  # 1. WINDOWS BUILD & PACKAGING (x64)
   # =========================================================================
   build-windows:
     name: Windows x64 Build & Test
@@ -56,15 +56,15 @@ jobs:
       - name: Upload Windows Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: lifescreen-windows-x64
+          name: lifescreen-windows
           path: dist/lifescreen-windows-x64.zip
           retention-days: 14
 
   # =========================================================================
-  # 2. LINUX CI & CROSS-COMPILATION CHECK
+  # 2. LINUX BUILD & PACKAGING (x64: .tar.gz, .deb, .rpm)
   # =========================================================================
   build-linux:
-    name: Linux CI & Verification
+    name: Linux x64 Build & Packages
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -75,21 +75,82 @@ jobs:
         with:
           version: 0.17.0
 
+      - name: Install System Dependencies & Packaging Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev alien rpm
+
       - name: Check Zig Syntax & Formatter
         run: |
           zig fmt --check src/root.zig src/main.zig
 
-      - name: Test Core Platform-Agnostic Subsystems
+      - name: Run Unit Tests
         run: |
-          # Test core clock, ring_buffer, i18n, and config models
-          zig test src/core/ring_buffer.zig
-          zig test src/config/storage.zig
+          zig build test --summary all
+
+      - name: Build LifeScreen Linux (ReleaseFast)
+        run: |
+          zig build -Doptimize=ReleaseFast
+
+      - name: Package Linux Artifacts (tar.gz, deb, rpm)
+        run: |
+          mkdir -p dist
+
+          # 1. Portable tar.gz
+          tar -czvf dist/lifescreen-linux-x64.tar.gz -C zig-out/bin lifescreen
+
+          # 2. Debian / Ubuntu .deb package
+          mkdir -p deb-pkg/DEBIAN
+          mkdir -p deb-pkg/usr/bin
+          mkdir -p deb-pkg/usr/share/applications
+          mkdir -p deb-pkg/usr/share/icons/hicolor/256x256/apps
+          mkdir -p deb-pkg/usr/share/lifescreen/resources
+
+          cp zig-out/bin/lifescreen deb-pkg/usr/bin/
+          if [ -d "resources" ]; then cp -r resources/* deb-pkg/usr/share/lifescreen/resources/ 2>/dev/null || true; fi
+          if [ -f "resources/icon.png" ]; then cp resources/icon.png deb-pkg/usr/share/icons/hicolor/256x256/apps/lifescreen.png 2>/dev/null || true; fi
+
+          cat << 'EOF' > deb-pkg/DEBIAN/control
+          Package: lifescreen
+          Version: 0.1.0
+          Section: video
+          Priority: optional
+          Architecture: amd64
+          Depends: libavcodec58 | libavcodec59 | libavcodec60 | libavcodec61, libavformat58 | libavformat59 | libavformat60 | libavformat61
+          Maintainer: lifescreen-recorder <contact@lifescreen.app>
+          Description: High performance screen, window, and game recorder.
+          EOF
+
+          cat << 'EOF' > deb-pkg/usr/share/applications/lifescreen.desktop
+          [Desktop Entry]
+          Name=LifeScreen
+          Comment=High performance screen recorder
+          Exec=lifescreen
+          Icon=lifescreen
+          Terminal=false
+          Type=Application
+          Categories=AudioVideo;Recorder;
+          EOF
+
+          chmod 755 deb-pkg/usr/bin/lifescreen
+          dpkg-deb --build --root-owner-group deb-pkg dist/lifescreen-linux-x64.deb
+
+          # 3. Fedora / RHEL / openSUSE .rpm package
+          sudo alien -r --to-rpm --scripts dist/lifescreen-linux-x64.deb
+          mv lifescreen*.rpm dist/lifescreen-linux-x64.rpm || true
+
+      - name: Upload Linux Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lifescreen-linux
+          path: dist/lifescreen-linux-x64.*
+          retention-days: 14
 
   # =========================================================================
-  # 3. MACOS CI & ENVIRONMENT VERIFICATION
+  # 3. MACOS BUILD & PACKAGING (Apple Silicon: .tar.gz)
   # =========================================================================
   build-macos:
-    name: macOS (Apple Silicon) Verification
+    name: macOS (Apple Silicon) Build & Test
     runs-on: macos-latest
     steps:
       - name: Checkout repository
@@ -100,44 +161,59 @@ jobs:
         with:
           version: 0.17.0
 
-      - name: Verify Zig Toolchain on macOS
+      - name: Install macOS Dependencies
         run: |
-          zig version
-          zig fmt --check src/root.zig src/main.zig
+          brew install ffmpeg pkg-config
 
-      - name: Test Core Engine Modules
+      - name: Run Unit Tests
         run: |
-          zig test src/core/ring_buffer.zig
-          zig test src/config/storage.zig
+          zig build test --summary all
+
+      - name: Build LifeScreen macOS (ReleaseFast)
+        run: |
+          zig build -Doptimize=ReleaseFast
+
+      - name: Package macOS Release Artifact
+        run: |
+          mkdir -p dist
+          tar -czvf dist/lifescreen-macos-arm64.tar.gz -C zig-out/bin lifescreen
+
+      - name: Upload macOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lifescreen-macos
+          path: dist/lifescreen-macos-arm64.tar.gz
+          retention-days: 14
 
   # =========================================================================
-  # 4. GITHUB RELEASE AUTOMATION (Triggered on v*.*.* tag)
+  # 4. GITHUB RELEASE AUTOMATION (Triggered on v* tag)
   # =========================================================================
   release:
-    name: Publish GitHub Release
+    name: Publish Multi-Platform GitHub Release
     needs: [build-windows, build-linux, build-macos]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Download Windows Artifact
+      - name: Download All Artifacts
         uses: actions/download-artifact@v4
         with:
-          name: lifescreen-windows-x64
-          path: ./release-artifacts
+          path: ./temp-artifacts
 
-      - name: Generate Checksums
+      - name: Organize Release Artifacts & Generate Checksums
         run: |
+          mkdir -p ./release-artifacts
+          find ./temp-artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" -o -name "*.deb" -o -name "*.rpm" \) -exec cp {} ./release-artifacts/ \;
           cd ./release-artifacts
-          sha256sum lifescreen-windows-x64.zip > sha256_checksums.txt
+          sha256sum * > sha256_checksums.txt
+          ls -la
 
-      - name: Create GitHub Release
+      - name: Create / Update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            ./release-artifacts/lifescreen-windows-x64.zip
-            ./release-artifacts/sha256_checksums.txt
+            ./release-artifacts/*
           draft: false
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
           generate_release_notes: true
