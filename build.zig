@@ -5,6 +5,8 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const is_windows = target.result.os.tag == .windows;
+    const is_linux = target.result.os.tag == .linux;
+    const is_darwin = target.result.os.tag.isDarwin();
 
     // 1. Core LifeScreen module
     const lifescreen_mod = b.addModule("lifescreen", .{
@@ -114,15 +116,13 @@ pub fn build(b: *std.Build) void {
         hook_dll.root_module.linkSystemLibrary("user32", .{});
 
         b.installArtifact(hook_dll);
-    } else {
-        // Linux / macOS platform linking
-        exe.root_module.linkSystemLibrary("avcodec", .{});
-        exe.root_module.linkSystemLibrary("avformat", .{});
-        exe.root_module.linkSystemLibrary("avutil", .{});
-        exe.root_module.linkSystemLibrary("swresample", .{});
-        exe.root_module.linkSystemLibrary("swscale", .{});
+    } else if (is_linux) {
+        // Linux platform linking
+        exe.root_module.linkSystemLibrary("c", .{});
         exe.root_module.linkSystemLibrary("m", .{});
-        exe.root_module.linkSystemLibrary("pthread", .{});
+    } else if (is_darwin) {
+        // macOS platform linking
+        exe.root_module.linkSystemLibrary("c", .{});
     }
 
     b.installArtifact(exe);

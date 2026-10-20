@@ -75,10 +75,10 @@ jobs:
         with:
           version: 0.17.0
 
-      - name: Install System Dependencies & Packaging Tools
+      - name: Install Packaging Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev alien rpm
+          sudo apt-get install -y alien rpm
 
       - name: Check Zig Syntax & Formatter
         run: |
@@ -116,7 +116,6 @@ jobs:
           Section: video
           Priority: optional
           Architecture: amd64
-          Depends: libavcodec58 | libavcodec59 | libavcodec60 | libavcodec61, libavformat58 | libavformat59 | libavformat60 | libavformat61
           Maintainer: lifescreen-recorder <contact@lifescreen.app>
           Description: High performance screen, window, and game recorder.
           EOF
@@ -160,10 +159,6 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
-
-      - name: Install macOS Dependencies
-        run: |
-          brew install ffmpeg pkg-config
 
       - name: Run Unit Tests
         run: |
