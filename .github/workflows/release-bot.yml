@@ -1,0 +1,193 @@
+name: Release Bot
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  # =========================================================================
+  # 1. EVALUATE PUSH (Regular commit vs Release PR Merge)
+  # =========================================================================
+  check-push:
+    name: Check Push Type
+    runs-on: ubuntu-latest
+    outputs:
+      is_release_merge: ${{ steps.check.outputs.is_release_merge }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Evaluate Commit Message
+        id: check
+        run: |
+          COMMIT_MSG=$(git log -1 --pretty=%B)
+          echo "Recent commit message:"
+          echo "$COMMIT_MSG"
+
+          # Check if this push is a merge of a Release PR
+          if echo "$COMMIT_MSG" | grep -qiE "chore\(release\)|release v|bot/release-preview"; then
+            echo "Detected Release PR Merge!"
+            echo "is_release_merge=true" >> $GITHUB_OUTPUT
+
+            # Extract version, e.g. v0.1.1
+            VER=$(echo "$COMMIT_MSG" | grep -oE "v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?")
+            if [ -z "$VER" ]; then
+              VER="v$(cat VERSION 2>/dev/null || echo '0.1.1' | tr -d 'v \r\n')"
+            fi
+            echo "version=$VER" >> $GITHUB_OUTPUT
+            echo "Target release version: $VER"
+          else
+            echo "Detected regular development commit(s)."
+            echo "is_release_merge=false" >> $GITHUB_OUTPUT
+          fi
+
+  # =========================================================================
+  # 2. CREATE / UPDATE RELEASE PULL REQUEST
+  # =========================================================================
+  prepare-release-pr:
+    name: Create / Update Release PR
+    needs: check-push
+    if: needs.check-push.outputs.is_release_merge == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Calculate Commits & Next Version
+        id: release_data
+        run: |
+          # Fetch all tags
+          git fetch --tags --force 2>/dev/null || true
+
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          echo "Latest tag found: $LATEST_TAG"
+
+          if [ -n "$LATEST_TAG" ]; then
+            COMMITS=$(git log --pretty=format:"* %s ([%h](https://github.com/${{ github.repository }}/commit/%H)) by @%an" "${LATEST_TAG}..HEAD")
+          else
+            COMMITS=$(git log -n 20 --pretty=format:"* %s ([%h](https://github.com/${{ github.repository }}/commit/%H)) by @%an" HEAD)
+          fi
+
+          if [ -z "$COMMITS" ]; then
+            echo "No new commits since $LATEST_TAG. Skipping PR update."
+            echo "has_commits=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "has_commits=true" >> $GITHUB_OUTPUT
+
+          # Determine version
+          if [ -f "VERSION" ]; then
+            CURRENT_VER=$(cat VERSION | tr -d 'v \r\n')
+          elif [ -n "$LATEST_TAG" ]; then
+            CURRENT_VER="${LATEST_TAG#v}"
+          else
+            CURRENT_VER="0.1.0"
+          fi
+
+          # Semantic version increment (Patch bump)
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VER"
+          PATCH_NUM=$(echo "$PATCH" | grep -oE "^[0-9]+" || echo "0")
+          NEXT_PATCH=$((PATCH_NUM + 1))
+          NEXT_VER="${MAJOR:-0}.${MINOR:-1}.${NEXT_PATCH}"
+
+          echo "current_version=$CURRENT_VER" >> $GITHUB_OUTPUT
+          echo "next_version=$NEXT_VER" >> $GITHUB_OUTPUT
+
+          # Save commits list to temp file for multi-line GitHub output
+          echo "$COMMITS" > commits.txt
+
+          # Update VERSION file
+          echo "$NEXT_VER" > VERSION
+
+          # Update build.zig.zon if exists
+          if [ -f "build.zig.zon" ]; then
+            sed -i -E "s/\.version = \"[^\"]+\"/\.version = \"$NEXT_VER\"/" build.zig.zon
+          fi
+
+          # Update Inno Setup script
+          if [ -f "installer/lifescreen_setup.iss" ]; then
+            sed -i -E "s/#define MyAppVersion \"[^\"]+\"/#define MyAppVersion \"$NEXT_VER\"/" installer/lifescreen_setup.iss
+          fi
+
+          # Update CHANGELOG.md
+          DATE=$(date -u +'%Y-%m-%d')
+          ENTRY="## [v${NEXT_VER}] - ${DATE}
+
+### 📋 Changes & Accepted Commits:
+${COMMITS}
+"
+          if [ -f "CHANGELOG.md" ]; then
+            printf "%s\n\n%s\n" "$ENTRY" "$(cat CHANGELOG.md)" > CHANGELOG.md
+          else
+            printf "# Changelog\n\n%s\n" "$ENTRY" > CHANGELOG.md
+          fi
+
+      - name: Create or Update Pull Request
+        if: steps.release_data.outputs.has_commits == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: bot/release-preview
+          base: main
+          title: "🚀 Release v${{ steps.release_data.outputs.next_version }}"
+          commit-message: "chore(release): v${{ steps.release_data.outputs.next_version }}"
+          labels: |
+            autorelease: pending
+            release
+          body: |
+            ## 🤖 LifeScreen Automated Release PR
+
+            Всі останні зміни та коміти, прийняті в основну гілку `main`, автоматично зібрано для випуску наступного релізу **v${{ steps.release_data.outputs.next_version }}**.
+
+            ### 📝 Список прийнятих комітів (Changelog):
+            $(cat commits.txt)
+
+            ---
+            ### 📦 Бінарні пакунки, які будуть автоматично зібрані після злиття:
+            - 🪟 **Windows**: `lifescreen-windows-x64-installer.exe` (Інсталятор) та `lifescreen-windows-x64-portable.zip` (Portable)
+            - 🐧 **Linux**: `lifescreen-linux-x64.deb` (Debian/Ubuntu), `lifescreen-linux-x64.rpm` (Fedora/RHEL), `lifescreen-linux-x64.tar.gz`
+            - 🍏 **macOS**: `lifescreen-macos-arm64.tar.gz` (Apple Silicon)
+            - 🛡️ **Безпека**: `sha256_checksums.txt` (Контрольні суми)
+
+            ---
+            > ℹ️ **Інструкція для розробника:**
+            > 1. Перегляньте перелік комітів та оновлений `CHANGELOG.md`.
+            > 2. Натисніть кнопку **"Merge pull request"**.
+            > 3. Бот автоматично створить тег **`v${{ steps.release_data.outputs.next_version }}`**, запустить кросплатформовий білд на Windows, Linux і Mac та опублікує офіційний реліз на GitHub!
+
+  # =========================================================================
+  # 3. TRIGGER RELEASE ON MERGE
+  # =========================================================================
+  trigger-release:
+    name: Trigger Release Workflow on Merge
+    needs: check-push
+    if: needs.check-push.outputs.is_release_merge == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create Git Tag and Trigger CI/CD Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.check-push.outputs.version }}
+        run: |
+          echo "Release PR was merged! Creating tag $TAG..."
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Official Release $TAG"
+          git push origin "$TAG" --force
+
+          echo "Triggering multi-platform CI/CD release workflow for tag $TAG..."
+          gh workflow run ci.yml --ref "$TAG" || gh workflow run ci.yml --ref main -f tag_name="$TAG"
