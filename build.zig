@@ -35,6 +35,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    if (is_windows) {
+        exe.subsystem = .windows;
+    }
+
     // Add C bridges and FFmpeg options to root_module
     if (is_windows) {
         exe.root_module.addCSourceFile(.{

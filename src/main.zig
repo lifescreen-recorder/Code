@@ -8,6 +8,7 @@ const is_windows = builtin.os.tag == .windows;
 
 const win32 = if (is_windows) struct {
     extern "kernel32" fn GetCommandLineA() callconv(.winapi) [*:0]const u8;
+    extern "kernel32" fn AttachConsole(dwProcessId: u32) callconv(.winapi) i32;
     extern "winmm" fn timeBeginPeriod(uPeriod: u32) callconv(.winapi) u32;
     extern "winmm" fn timeEndPeriod(uPeriod: u32) callconv(.winapi) u32;
     extern "user32" fn SetProcessDPIAware() callconv(.winapi) i32;
@@ -16,6 +17,7 @@ const win32 = if (is_windows) struct {
 
 pub fn main() !void {
     if (is_windows) {
+        _ = win32.AttachConsole(0xFFFFFFFF); // Attach to parent console if invoked from CLI
         // Enable Per-Monitor DPI Awareness V2 for 1:1 pixel coords and cursor alignment
         _ = win32.SetProcessDpiAwarenessContext(-4); // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
         _ = win32.SetProcessDPIAware();

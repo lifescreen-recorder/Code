@@ -14,10 +14,10 @@ concurrency:
 
 jobs:
   # =========================================================================
-  # 1. WINDOWS BUILD & PACKAGING (x64)
+  # 1. WINDOWS BUILD & PACKAGING (Installer + Portable Zip)
   # =========================================================================
   build-windows:
-    name: Windows x64 Build & Test
+    name: Windows x64 Build & Packaging
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -48,16 +48,26 @@ jobs:
           if (-not (Test-Path zig-out\bin\resources)) { New-Item -ItemType Directory -Path zig-out\bin\resources }
           Copy-Item resources\* zig-out\bin\resources\ -Force
 
-      - name: Package Windows Release Artifact
+      - name: Package Windows Artifacts (Installer & Portable Zip)
         run: |
           New-Item -ItemType Directory -Path dist -Force
-          Compress-Archive -Path zig-out\bin\* -DestinationPath dist\lifescreen-windows-x64.zip -Force
 
-      - name: Upload Windows Artifact
+          # 1. Portable Zip
+          Compress-Archive -Path zig-out\bin\* -DestinationPath dist\lifescreen-windows-x64-portable.zip -Force
+
+          # 2. Build Inno Setup Installer
+          if (-not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --no-progress -y
+          }
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\lifescreen_setup.iss
+
+      - name: Upload Windows Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: lifescreen-windows
-          path: dist/lifescreen-windows-x64.zip
+          path: |
+            dist/lifescreen-windows-x64-installer.exe
+            dist/lifescreen-windows-x64-portable.zip
           retention-days: 14
 
   # =========================================================================
@@ -199,7 +209,7 @@ jobs:
       - name: Organize Release Artifacts & Generate Checksums
         run: |
           mkdir -p ./release-artifacts
-          find ./temp-artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" -o -name "*.deb" -o -name "*.rpm" \) -exec cp {} ./release-artifacts/ \;
+          find ./temp-artifacts -type f \( -name "*.exe" -o -name "*.zip" -o -name "*.tar.gz" -o -name "*.deb" -o -name "*.rpm" \) -exec cp {} ./release-artifacts/ \;
           cd ./release-artifacts
           sha256sum * > sha256_checksums.txt
           ls -la
