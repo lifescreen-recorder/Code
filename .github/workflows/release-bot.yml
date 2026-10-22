@@ -74,9 +74,9 @@ jobs:
           echo "Latest tag found: $LATEST_TAG"
 
           if [ -n "$LATEST_TAG" ]; then
-            COMMITS=$(git log --pretty=format:"* %s ([%h](https://github.com/${{ github.repository }}/commit/%H)) by @%an" "${LATEST_TAG}..HEAD")
+            COMMITS=$(git log --pretty=format:"* %s ([%h](https://github.com/${{ github.repository }}/commit/%H)) by @%an" "${LATEST_TAG}..HEAD" | grep -v -E "chore\(release\)" || true)
           else
-            COMMITS=$(git log -n 20 --pretty=format:"* %s ([%h](https://github.com/${{ github.repository }}/commit/%H)) by @%an" HEAD)
+            COMMITS=$(git log -n 25 --pretty=format:"* %s ([%h](https://github.com/${{ github.repository }}/commit/%H)) by @%an" HEAD | grep -v -E "chore\(release\)" || true)
           fi
 
           if [ -z "$COMMITS" ]; then
@@ -104,7 +104,7 @@ jobs:
           echo "current_version=$CURRENT_VER" >> $GITHUB_OUTPUT
           echo "next_version=$NEXT_VER" >> $GITHUB_OUTPUT
 
-          # Save commits list to temp file for multi-line GitHub output
+          # Save commits list to temp file
           echo "$COMMITS" > /tmp/commits.txt
 
           # Update VERSION file
@@ -120,12 +120,12 @@ jobs:
             sed -i -E "s/#define MyAppVersion \"[^\"]+\"/#define MyAppVersion \"$NEXT_VER\"/" installer/lifescreen_setup.iss
           fi
 
-          # Update CHANGELOG.md
+          # Update CHANGELOG.md in English
           DATE=$(date -u +'%Y-%m-%d')
           {
             echo "## [v${NEXT_VER}] - ${DATE}"
             echo ""
-            echo "### 📋 Changes & Accepted Commits:"
+            echo "### Changes:"
             cat /tmp/commits.txt
             echo ""
           } > /tmp/new_entry.tmp
@@ -142,27 +142,33 @@ jobs:
           fi
           rm -f /tmp/new_entry.tmp
 
-          # Generate PR description body file
+          # Generate modern English PR description
           {
-            echo "## 🤖 LifeScreen Automated Release PR"
+            echo "## 🚀 Release Candidate \`v${NEXT_VER}\`"
             echo ""
-            echo "Всі останні зміни та коміти, прийняті в основну гілку \`main\`, автоматично зібрано для випуску наступного релізу **v${NEXT_VER}**."
+            echo "This automated pull request packages all new commits accepted into \`main\` for release **\`v${NEXT_VER}\`**."
             echo ""
-            echo "### 📝 Список прийнятих комітів (Changelog):"
+            echo "### 📦 Version Summary"
+            echo "- **Base Version:** \`${CURRENT_VER}\`"
+            echo "- **Target Version:** **\`v${NEXT_VER}\`**"
+            if [ -n "$LATEST_TAG" ]; then
+              echo "- **Diff with previous release:** [\`${LATEST_TAG}...main\`](https://github.com/${{ github.repository }}/compare/${LATEST_TAG}...main)"
+            fi
+            echo ""
+            echo "### 📋 Accepted Commits:"
             cat /tmp/commits.txt
             echo ""
             echo "---"
-            echo "### 📦 Бінарні пакунки, які будуть автоматично зібрані після злиття:"
-            echo "- 🪟 **Windows**: \`lifescreen-windows-x64-installer.exe\` (Інсталятор) та \`lifescreen-windows-x64-portable.zip\` (Portable)"
-            echo "- 🐧 **Linux**: \`lifescreen-linux-x64.deb\` (Debian/Ubuntu), \`lifescreen-linux-x64.rpm\` (Fedora/RHEL), \`lifescreen-linux-x64.tar.gz\`"
-            echo "- 🍏 **macOS**: \`lifescreen-macos-arm64.tar.gz\` (Apple Silicon)"
-            echo "- 🛡️ **Безпека**: \`sha256_checksums.txt\` (Контрольні суми)"
-            echo ""
-            echo "---"
-            echo "> ℹ️ **Інструкція для розробника:**"
-            echo "> 1. Перегляньте перелік комітів та оновлений \`CHANGELOG.md\`."
-            echo "> 2. Натисніть кнопку **\"Merge pull request\"**."
-            echo "> 3. Бот автоматично створить тег **\`v${NEXT_VER}\`**, запустить кросплатформовий білд на Windows, Linux і Mac та опублікує офіційний реліз на GitHub!"
+            echo "### 📦 Target Distribution Packages"
+            echo "| Platform | Package / Binary | Description |"
+            echo "| :--- | :--- | :--- |"
+            echo "| 🪟 **Windows** | \`lifescreen-windows-x64-installer.exe\` | Setup Wizard (Inno Setup) |"
+            echo "| 🪟 **Windows** | \`lifescreen-windows-x64-portable.zip\` | Portable ZIP Archive |"
+            echo "| 🐧 **Linux** | \`lifescreen-linux-x64.deb\` | Debian / Ubuntu Package |"
+            echo "| 🐧 **Linux** | \`lifescreen-linux-x64.rpm\` | Fedora / RHEL Package |"
+            echo "| 🐧 **Linux** | \`lifescreen-linux-x64.tar.gz\` | Portable Tarball |"
+            echo "| 🍏 **macOS** | \`lifescreen-macos-arm64.tar.gz\` | Apple Silicon Binary Archive |"
+            echo "| 🛡️ **Security** | \`sha256_checksums.txt\` | Checksums & Integrity |"
           } > /tmp/pr_body.md
 
       - name: Create or Update Pull Request
@@ -182,10 +188,6 @@ jobs:
             release
           body-path: /tmp/pr_body.md
 
-      - name: Permissions Check Hint
-        if: failure() && steps.release_data.outputs.has_commits == 'true'
-        run: |
-          echo "::error title=Missing Workflow Permission::GitHub Actions потрібен дозвіл на створення PR. Увімкніть: Settings -> Actions -> General -> Workflow permissions -> 'Allow GitHub Actions to create and approve pull requests'."
 
   # =========================================================================
   # 3. TRIGGER RELEASE ON MERGE
