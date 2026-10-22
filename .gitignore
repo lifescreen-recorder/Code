@@ -19,3 +19,8 @@ vendor/ffmpeg/bin/
 *.mov
 *.wav
 test_screen_recording.*
+
+# Release Bot temporary files
+commits.txt
+pr_body.md
+*.tmp

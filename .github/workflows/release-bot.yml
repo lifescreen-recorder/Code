@@ -105,7 +105,7 @@ jobs:
           echo "next_version=$NEXT_VER" >> $GITHUB_OUTPUT
 
           # Save commits list to temp file for multi-line GitHub output
-          echo "$COMMITS" > commits.txt
+          echo "$COMMITS" > /tmp/commits.txt
 
           # Update VERSION file
           echo "$NEXT_VER" > VERSION
@@ -126,21 +126,21 @@ jobs:
             echo "## [v${NEXT_VER}] - ${DATE}"
             echo ""
             echo "### 📋 Changes & Accepted Commits:"
-            cat commits.txt
+            cat /tmp/commits.txt
             echo ""
-          } > new_entry.tmp
+          } > /tmp/new_entry.tmp
 
           if [ -f "CHANGELOG.md" ]; then
-            cat new_entry.tmp CHANGELOG.md > changelog_combined.tmp
-            mv changelog_combined.tmp CHANGELOG.md
+            cat /tmp/new_entry.tmp CHANGELOG.md > /tmp/changelog_combined.tmp
+            mv /tmp/changelog_combined.tmp CHANGELOG.md
           else
             {
               echo "# Changelog"
               echo ""
-              cat new_entry.tmp
+              cat /tmp/new_entry.tmp
             } > CHANGELOG.md
           fi
-          rm -f new_entry.tmp
+          rm -f /tmp/new_entry.tmp
 
           # Generate PR description body file
           {
@@ -149,7 +149,7 @@ jobs:
             echo "Всі останні зміни та коміти, прийняті в основну гілку \`main\`, автоматично зібрано для випуску наступного релізу **v${NEXT_VER}**."
             echo ""
             echo "### 📝 Список прийнятих комітів (Changelog):"
-            cat commits.txt
+            cat /tmp/commits.txt
             echo ""
             echo "---"
             echo "### 📦 Бінарні пакунки, які будуть автоматично зібрані після злиття:"
@@ -163,9 +163,10 @@ jobs:
             echo "> 1. Перегляньте перелік комітів та оновлений \`CHANGELOG.md\`."
             echo "> 2. Натисніть кнопку **\"Merge pull request\"**."
             echo "> 3. Бот автоматично створить тег **\`v${NEXT_VER}\`**, запустить кросплатформовий білд на Windows, Linux і Mac та опублікує офіційний реліз на GitHub!"
-          } > pr_body.md
+          } > /tmp/pr_body.md
 
       - name: Create or Update Pull Request
+        id: cpr
         if: steps.release_data.outputs.has_commits == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
@@ -179,7 +180,12 @@ jobs:
           labels: |
             autorelease: pending
             release
-          body-path: pr_body.md
+          body-path: /tmp/pr_body.md
+
+      - name: Permissions Check Hint
+        if: failure() && steps.release_data.outputs.has_commits == 'true'
+        run: |
+          echo "::error title=Missing Workflow Permission::GitHub Actions потрібен дозвіл на створення PR. Увімкніть: Settings -> Actions -> General -> Workflow permissions -> 'Allow GitHub Actions to create and approve pull requests'."
 
   # =========================================================================
   # 3. TRIGGER RELEASE ON MERGE
