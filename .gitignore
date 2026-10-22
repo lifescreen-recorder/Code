@@ -24,3 +24,4 @@ test_screen_recording.*
 commits.txt
 pr_body.md
 *.tmp
+dist/
