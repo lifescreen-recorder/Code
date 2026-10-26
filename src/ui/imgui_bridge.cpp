@@ -85,6 +85,16 @@ bool imgui_is_preview_enabled(void) {
 void imgui_update_preview_d3d11(void* d3d11_texture, int width, int height) {
     if (!d3d11_texture || !g_previewEnabled || g_previewPaused || !g_pd3dDevice || !g_pd3dDeviceContext) return;
 
+    // Zero-overhead when minimized or hidden (user is in full-screen or focused on a game)
+    if (g_hWnd && (IsIconic(g_hWnd) || !IsWindowVisible(g_hWnd))) return;
+
+    // Throttle preview texture copying to avoid competing with game GPU / CPU bandwidth
+    static DWORD s_lastPreviewUpdate = 0;
+    DWORD now = GetTickCount();
+    DWORD min_interval = (g_hWnd && GetForegroundWindow() != g_hWnd) ? 66 : 33; // 15 FPS when in background, 30 FPS in foreground
+    if (now - s_lastPreviewUpdate < min_interval) return;
+    s_lastPreviewUpdate = now;
+
     if (!g_previewCsInit) {
         InitializeCriticalSection(&g_previewCs);
         g_previewCsInit = true;
@@ -1520,12 +1530,27 @@ void imgui_window_render_ui(UiState* state) {
 }
 
 void imgui_window_present(void) {
+    if (g_hWnd && IsIconic(g_hWnd)) {
+        // Minimized: do not render ImGui draw list, sleep 40ms to keep CPU near 0.0%
+        Sleep(40);
+        return;
+    }
+
     ImGui::Render();
     const float clear_color[4] = { 0.10f, 0.11f, 0.13f, 1.00f };
     g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, NULL);
     g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-    g_pSwapChain->Present(1, 0); // V-Sync enabled
+    HRESULT hr = g_pSwapChain->Present(1, 0); // V-Sync enabled
+
+    if (hr == DXGI_STATUS_OCCLUDED) {
+        // Window is occluded (covered by game or other app): Present does not wait for V-Sync.
+        // Sleep to avoid high-frequency unthrottled loop!
+        Sleep(30);
+    } else if (g_hWnd && GetForegroundWindow() != g_hWnd) {
+        // Window in background while playing game: throttle to 30 FPS
+        Sleep(16);
+    }
 }
 
 void imgui_window_get_size(int* out_width, int* out_height) {

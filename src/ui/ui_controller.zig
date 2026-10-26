@@ -593,7 +593,7 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
         // Live real-time VU audio meters
         var sys_peak: f32 = 0.0;
         if (ui_state.record_system_audio) {
-            if (snap.state == .recording and snap.audio_peak_system > 0.0) {
+            if (snap.state == .recording) {
                 sys_peak = snap.audio_peak_system;
             } else {
                 sys_peak = wasapi.getDevicePeak(0, @intCast(ui_state.selected_audio_output));
@@ -603,7 +603,7 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
 
         var mic_peak: f32 = 0.0;
         if (ui_state.record_microphone) {
-            if (snap.state == .recording and snap.audio_peak_mic > 0.0) {
+            if (snap.state == .recording) {
                 mic_peak = snap.audio_peak_mic;
             } else {
                 mic_peak = wasapi.getDevicePeak(1, @intCast(ui_state.selected_audio_input));

@@ -244,8 +244,10 @@ pub const Pipeline = struct {
                 last_valid_frame = frame;
                 _ = self.stats.captured_frames.fetchAdd(1, .monotonic);
 
-                // Update real-time screen preview
-                app_window.imgui_update_preview_d3d11(frame.gpu_texture_ptr, @intCast(frame.width), @intCast(frame.height));
+                // Update real-time screen preview (throttled to 30 FPS to save GPU/CPU bandwidth)
+                if (frame_idx % 2 == 0 and app_window.imgui_is_preview_enabled()) {
+                    app_window.imgui_update_preview_d3d11(frame.gpu_texture_ptr, @intCast(frame.width), @intCast(frame.height));
+                }
 
                 // Real-time live pacing: keep buffer depth <= 16 frames (allows absorbing I-frame encode bursts)
                 while (self.frame_ring.available() >= 16) {
@@ -497,7 +499,9 @@ pub const Pipeline = struct {
             }
 
             if (!did_read) {
-                clock.sleepMs(2);
+                clock.sleepMs(5);
+            } else {
+                clock.sleepMs(1);
             }
         }
     }

@@ -26,12 +26,12 @@ pub fn sleepPreciseUntil(target_time_nanos: u64) void {
         const now = MonotonicClock.nowNanos();
         if (now >= target_time_nanos) break;
         const diff_ns = target_time_nanos - now;
-        if (diff_ns >= 2_000_000) {
+        if (diff_ns >= 1_200_000) {
             Sleep(1);
-        } else if (diff_ns >= 300_000) {
-            Sleep(0);
-        } else {
+        } else if (diff_ns >= 150_000) {
             std.Thread.yield() catch {};
+        } else {
+            std.atomic.spinLoopHint();
         }
     }
 }
