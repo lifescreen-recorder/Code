@@ -62,6 +62,139 @@ static int                      g_overlaySecs = 0;
 static int                      g_overlayFps = 60;
 static int                      g_currentHotkeyPreset = -1;
 
+// Live Screen Preview Engine State
+static ID3D11Texture2D*          g_pPreviewTexture = NULL;
+static ID3D11ShaderResourceView* g_pPreviewSRV = NULL;
+static int                       g_previewWidth = 0;
+static int                       g_previewHeight = 0;
+static bool                      g_previewEnabled = true;
+static bool                      g_previewPaused = false;
+static uint64_t                  g_previewFrameCount = 0;
+static CRITICAL_SECTION          g_previewCs;
+static bool                      g_previewCsInit = false;
+
+extern "C" {
+void imgui_set_preview_enabled(bool enabled) {
+    g_previewEnabled = enabled;
+}
+
+bool imgui_is_preview_enabled(void) {
+    return g_previewEnabled;
+}
+
+void imgui_update_preview_d3d11(void* d3d11_texture, int width, int height) {
+    if (!d3d11_texture || !g_previewEnabled || g_previewPaused || !g_pd3dDevice || !g_pd3dDeviceContext) return;
+
+    if (!g_previewCsInit) {
+        InitializeCriticalSection(&g_previewCs);
+        g_previewCsInit = true;
+    }
+    EnterCriticalSection(&g_previewCs);
+
+    ID3D11Texture2D* srcTex = (ID3D11Texture2D*)d3d11_texture;
+
+    int req_w = (width > 0) ? width : 1920;
+    int req_h = (height > 0) ? height : 1080;
+
+    if (!g_pPreviewTexture || g_previewWidth != req_w || g_previewHeight != req_h) {
+        if (g_pPreviewSRV) { g_pPreviewSRV->Release(); g_pPreviewSRV = NULL; }
+        if (g_pPreviewTexture) { g_pPreviewTexture->Release(); g_pPreviewTexture = NULL; }
+
+        D3D11_TEXTURE2D_DESC desc = {};
+        desc.Width = (UINT)req_w;
+        desc.Height = (UINT)req_h;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+
+        HRESULT hr = g_pd3dDevice->CreateTexture2D(&desc, NULL, &g_pPreviewTexture);
+        if (SUCCEEDED(hr) && g_pPreviewTexture) {
+            D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+            srvDesc.Format = desc.Format;
+            srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            srvDesc.Texture2D.MipLevels = 1;
+            g_pd3dDevice->CreateShaderResourceView(g_pPreviewTexture, &srvDesc, &g_pPreviewSRV);
+            g_previewWidth = req_w;
+            g_previewHeight = req_h;
+        }
+    }
+
+    if (g_pPreviewTexture && g_pd3dDeviceContext) {
+        ID3D11Device* srcDev = NULL;
+        srcTex->GetDevice(&srcDev);
+        if (srcDev == g_pd3dDevice) {
+            g_pd3dDeviceContext->CopyResource((ID3D11Resource*)g_pPreviewTexture, (ID3D11Resource*)srcTex);
+            if (srcDev) srcDev->Release();
+        } else {
+            if (srcDev) srcDev->Release();
+            IDXGIResource* dxgiRes = NULL;
+            if (SUCCEEDED(srcTex->QueryInterface(__uuidof(IDXGIResource), (void**)&dxgiRes)) && dxgiRes) {
+                HANDLE sharedHandle = NULL;
+                if (SUCCEEDED(dxgiRes->GetSharedHandle(&sharedHandle)) && sharedHandle) {
+                    ID3D11Texture2D* openedTex = NULL;
+                    if (SUCCEEDED(g_pd3dDevice->OpenSharedResource(sharedHandle, __uuidof(ID3D11Texture2D), (void**)&openedTex)) && openedTex) {
+                        g_pd3dDeviceContext->CopyResource((ID3D11Resource*)g_pPreviewTexture, (ID3D11Resource*)openedTex);
+                        openedTex->Release();
+                    }
+                }
+                dxgiRes->Release();
+            }
+        }
+        g_previewFrameCount++;
+    }
+
+    LeaveCriticalSection(&g_previewCs);
+}
+
+void imgui_update_preview_bgra(const uint8_t* bgra_data, int width, int height, int stride) {
+    if (!bgra_data || !g_previewEnabled || g_previewPaused || !g_pd3dDevice || !g_pd3dDeviceContext) return;
+    if (!g_previewCsInit) {
+        InitializeCriticalSection(&g_previewCs);
+        g_previewCsInit = true;
+    }
+    EnterCriticalSection(&g_previewCs);
+
+    int req_w = (width > 0) ? width : 1920;
+    int req_h = (height > 0) ? height : 1080;
+
+    if (!g_pPreviewTexture || g_previewWidth != req_w || g_previewHeight != req_h) {
+        if (g_pPreviewSRV) { g_pPreviewSRV->Release(); g_pPreviewSRV = NULL; }
+        if (g_pPreviewTexture) { g_pPreviewTexture->Release(); g_pPreviewTexture = NULL; }
+
+        D3D11_TEXTURE2D_DESC desc = {};
+        desc.Width = (UINT)req_w;
+        desc.Height = (UINT)req_h;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+        HRESULT hr = g_pd3dDevice->CreateTexture2D(&desc, NULL, &g_pPreviewTexture);
+        if (SUCCEEDED(hr) && g_pPreviewTexture) {
+            D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+            srvDesc.Format = desc.Format;
+            srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            srvDesc.Texture2D.MipLevels = 1;
+            g_pd3dDevice->CreateShaderResourceView(g_pPreviewTexture, &srvDesc, &g_pPreviewSRV);
+            g_previewWidth = req_w;
+            g_previewHeight = req_h;
+        }
+    }
+
+    if (g_pPreviewTexture && g_pd3dDeviceContext) {
+        g_pd3dDeviceContext->UpdateSubresource((ID3D11Resource*)g_pPreviewTexture, 0, NULL, bgra_data, stride, 0);
+        g_previewFrameCount++;
+    }
+
+    LeaveCriticalSection(&g_previewCs);
+}
+}
+
 static void create_render_target(void) {
     ID3D11Texture2D* pBackBuffer = NULL;
     if (g_pSwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer)) == S_OK && pBackBuffer) {
@@ -160,7 +293,10 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         case WM_SIZE:
             if (g_pd3dDevice != NULL && wParam != SIZE_MINIMIZED) {
-                cleanup_render_target();
+                if (g_pPreviewSRV) { g_pPreviewSRV->Release(); g_pPreviewSRV = NULL; }
+    if (g_pPreviewTexture) { g_pPreviewTexture->Release(); g_pPreviewTexture = NULL; }
+    if (g_previewCsInit) { DeleteCriticalSection(&g_previewCs); g_previewCsInit = false; }
+    cleanup_render_target();
                 g_pSwapChain->ResizeBuffers(0, (UINT)LOWORD(lParam), (UINT)HIWORD(lParam), DXGI_FORMAT_UNKNOWN, 0);
                 create_render_target();
             }

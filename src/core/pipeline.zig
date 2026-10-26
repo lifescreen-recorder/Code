@@ -11,6 +11,7 @@ const wasapi = @import("../platform/windows/wasapi_audio.zig");
 const encoder = @import("../encoders/ffmpeg_encoder.zig");
 const muxer = @import("../encoders/muxer.zig");
 const wav_writer = @import("../encoders/wav_writer.zig");
+const app_window = @import("../ui/app_window.zig");
 
 const log = std.log.scoped(.pipeline);
 const THREAD_PRIORITY_HIGHEST = 2;
@@ -243,8 +244,10 @@ pub const Pipeline = struct {
                 last_valid_frame = frame;
                 _ = self.stats.captured_frames.fetchAdd(1, .monotonic);
 
+                // Update real-time screen preview
+                app_window.imgui_update_preview_d3d11(frame.gpu_texture_ptr, @intCast(frame.width), @intCast(frame.height));
+
                 // Real-time live pacing: keep buffer depth <= 16 frames (allows absorbing I-frame encode bursts)
-                // If encoder is genuinely falling behind (>250ms backlog), drop oldest frame so stream stays live
                 while (self.frame_ring.available() >= 16) {
                     _ = self.frame_ring.tryPop();
                     _ = self.stats.dropped_frames.fetchAdd(1, .monotonic);
@@ -255,9 +258,10 @@ pub const Pipeline = struct {
                 }
                 frame_idx += 1;
             } else if (last_valid_frame) |prev| {
-                // If screen hasn't changed or timed out: only duplicate if ring buffer is empty!
-                // Never inject repeat frames into a busy encoder queue.
-                if (self.frame_ring.available() == 0) {
+                // Adaptive VFR keepalive: only inject duplicate frame if at least 100ms elapsed
+                // to maintain video player container sync without wasting GPU encoder cycles on static screens
+                const last_pts = prev.pts_nanos;
+                if (real_pts_nanos >= last_pts + 100_000_000 and self.frame_ring.available() == 0) {
                     var repeat_frame = prev;
                     repeat_frame.pts_nanos = real_pts_nanos;
                     repeat_frame.frame_index = frame_idx;

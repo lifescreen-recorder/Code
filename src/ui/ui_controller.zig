@@ -13,6 +13,7 @@ const clock = @import("../core/clock.zig");
 const encoder = @import("../encoders/ffmpeg_encoder.zig");
 const paths = @import("../config/paths.zig");
 const wasapi = @import("../platform/windows/wasapi_audio.zig");
+const capture_backend = @import("../platform/windows/capture_backend.zig");
 
 extern "shell32" fn ShellExecuteA(hwnd: ?*anyopaque, lpOperation: [*:0]const u8, lpFile: [*:0]const u8, lpParameters: ?[*:0]const u8, lpDirectory: ?[*:0]const u8, nShowCmd: c_int) callconv(.winapi) ?*anyopaque;
 extern "shell32" fn SHCreateDirectoryExA(hwnd: ?*anyopaque, pszPath: [*:0]const u8, psa: ?*anyopaque) callconv(.winapi) c_int;
@@ -269,6 +270,15 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
     @memcpy(ui_state.output_dir[0..out_dir_len], default_dir[0..out_dir_len]);
     ui_state.output_dir[out_dir_len] = 0;
 
+    var preview_backend: ?capture_backend.CaptureBackend = null;
+    var preview_target = types.CaptureTarget{
+        .capture_type = .entire_screen,
+        .monitor_index = 0,
+        .capture_cursor = true,
+    };
+    var last_preview_ms: u64 = 0;
+    defer if (preview_backend) |*pb| pb.deinit();
+
     const start_time = clock.MonotonicClock.nowNanos() / 1_000_000;
 
     while (window.pollEvents()) {
@@ -289,6 +299,65 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
         }
         if (window.pollPauseHotkey()) {
             ui_state.action_pause_toggle_requested = true;
+        }
+
+        // Idle Screen Preview Update (30 FPS when not recording)
+        if (!recorder_pipeline.is_running.load(.monotonic) and app_window.imgui_is_preview_enabled()) {
+            if (now_ms - last_preview_ms >= 33) {
+                last_preview_ms = now_ms;
+
+                var current_target = types.CaptureTarget{
+                    .capture_type = switch (ui_state.capture_type) {
+                        1 => .window,
+                        2 => .game,
+                        else => .entire_screen,
+                    },
+                    .capture_cursor = ui_state.capture_cursor,
+                };
+
+                if (current_target.capture_type == .entire_screen) {
+                    if (monitors.len > 0 and ui_state.selected_monitor < monitors.len) {
+                        current_target.monitor_index = @intCast(ui_state.selected_monitor);
+                        if (monitors[@intCast(ui_state.selected_monitor)].hmonitor) |hmon| {
+                            current_target.monitor_handle = @intFromPtr(hmon);
+                        }
+                    }
+                } else {
+                    if (window_entries.windows.len > 0 and ui_state.selected_window < window_entries.windows.len) {
+                        current_target.window_handle = window_entries.windows[@intCast(ui_state.selected_window)].hwnd;
+                    }
+                }
+
+                const target_changed = (current_target.capture_type != preview_target.capture_type) or
+                    (current_target.monitor_index != preview_target.monitor_index) or
+                    (current_target.monitor_handle != preview_target.monitor_handle) or
+                    (current_target.window_handle != preview_target.window_handle) or
+                    (current_target.capture_cursor != preview_target.capture_cursor);
+
+                if (target_changed and preview_backend != null) {
+                    preview_backend.?.deinit();
+                    preview_backend = null;
+                }
+
+                preview_target = current_target;
+
+                if (preview_backend == null) {
+                    preview_backend = capture_backend.CaptureBackend.init(preview_target) catch null;
+                    if (preview_backend) |pb| {
+                        ui_state.preview_width = @intCast(pb.width);
+                        ui_state.preview_height = @intCast(pb.height);
+                    }
+                }
+
+                if (preview_backend) |*pb| {
+                    const now_ns = clock.MonotonicClock.nowNanos();
+                    if (pb.acquireFrame(2, now_ns)) |maybe_frame| {
+                        if (maybe_frame) |frame| {
+                            app_window.imgui_update_preview_d3d11(frame.gpu_texture_ptr, @intCast(frame.width), @intCast(frame.height));
+                        }
+                    } else |_| {}
+                }
+            }
         }
 
         // Handle Settings changes

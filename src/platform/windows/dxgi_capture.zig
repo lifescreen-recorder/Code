@@ -477,8 +477,8 @@ pub const DxgiCapture = struct {
                     .Height = height,
                     .Format = d3d11.DXGI_FORMAT_B8G8R8A8_UNORM,
                     .Usage = d3d11.D3D11_USAGE_DEFAULT,
-                    .BindFlags = d3d11.D3D11_BIND_RENDER_TARGET,
-                    .MiscFlags = 0,
+                    .BindFlags = d3d11.D3D11_BIND_RENDER_TARGET | d3d11.D3D11_BIND_SHADER_RESOURCE,
+                    .MiscFlags = 0x2, // D3D11_RESOURCE_MISC_SHARED
                 };
 
                 var dest_tex: *d3d11.ID3D11Texture2D = undefined;

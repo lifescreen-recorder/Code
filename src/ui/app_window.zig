@@ -81,6 +81,11 @@ extern fn imgui_window_destroy() callconv(.c) void;
 extern fn imgui_window_poll_start_hotkey() callconv(.c) bool;
 extern fn imgui_window_poll_pause_hotkey() callconv(.c) bool;
 
+pub extern fn imgui_update_preview_d3d11(texture_ptr: ?*anyopaque, width: c_int, height: c_int) callconv(.c) void;
+pub extern fn imgui_update_preview_bgra(data: ?[*]const u8, width: c_int, height: c_int, stride: c_int) callconv(.c) void;
+pub extern fn imgui_set_preview_enabled(enabled: bool) callconv(.c) void;
+pub extern fn imgui_is_preview_enabled() callconv(.c) bool;
+
 pub const AppWindow = struct {
     width: i32,
     height: i32,

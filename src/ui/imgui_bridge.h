@@ -105,6 +105,12 @@ void imgui_window_destroy(void);
 bool imgui_window_poll_start_hotkey(void);
 bool imgui_window_poll_pause_hotkey(void);
 
+// Live Screen Preview Engine
+void imgui_update_preview_d3d11(void* d3d11_texture, int width, int height);
+void imgui_update_preview_bgra(const uint8_t* bgra_data, int width, int height, int stride);
+void imgui_set_preview_enabled(bool enabled);
+bool imgui_is_preview_enabled(void);
+
 #ifdef __cplusplus
 }
 #endif
