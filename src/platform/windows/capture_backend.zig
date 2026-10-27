@@ -88,7 +88,10 @@ pub const CaptureBackend = struct {
                         };
                     }
                 } else {
-                    return error.NoWindowHandleSpecified;
+                    log.warn("No window handle specified, falling back to Entire Screen...", .{});
+                    var screen_target = target;
+                    screen_target.capture_type = .entire_screen;
+                    return init(screen_target);
                 }
             },
             .game => {
@@ -132,7 +135,10 @@ pub const CaptureBackend = struct {
                         };
                     }
                 } else {
-                    return error.NoWindowHandleSpecified;
+                    log.warn("No game window handle specified, falling back to Entire Screen...", .{});
+                    var screen_target = target;
+                    screen_target.capture_type = .entire_screen;
+                    return init(screen_target);
                 }
             },
         }

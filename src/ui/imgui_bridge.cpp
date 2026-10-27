@@ -1589,6 +1589,28 @@ void imgui_window_destroy(void) {
 bool imgui_window_poll_start_hotkey(void) {
     bool triggered = g_hotkey_start_triggered;
     g_hotkey_start_triggered = false;
+
+    // Asynchronous key-state fallback: ensures F9 (or F10) triggers recording even if
+    // another app or game intercepted RegisterHotKey, or when focus is elsewhere.
+    static bool s_f9_was_down = false;
+    static bool s_f10_was_down = false;
+
+    if (g_currentHotkeyPreset == 0 || g_currentHotkeyPreset == -1) {
+        SHORT keyState = GetAsyncKeyState(VK_F9);
+        bool is_down = (keyState & 0x8000) != 0;
+        if (is_down && !s_f9_was_down) {
+            triggered = true;
+        }
+        s_f9_was_down = is_down;
+    } else if (g_currentHotkeyPreset == 1) {
+        SHORT keyState = GetAsyncKeyState(VK_F10);
+        bool is_down = (keyState & 0x8000) != 0;
+        if (is_down && !s_f10_was_down) {
+            triggered = true;
+        }
+        s_f10_was_down = is_down;
+    }
+
     return triggered;
 }
 

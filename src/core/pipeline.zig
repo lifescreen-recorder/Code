@@ -76,6 +76,7 @@ pub const Pipeline = struct {
 
         self.stats.reset();
         self.stats.state.store(.starting, .release);
+        errdefer self.stats.state.store(.idle, .release);
 
         self.frame_ring.reset();
 

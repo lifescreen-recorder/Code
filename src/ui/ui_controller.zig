@@ -446,6 +446,12 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
         if (ui_state.action_start_requested) {
             ui_state.action_start_requested = false;
             if (!recorder_pipeline.is_running.load(.monotonic)) {
+                // Free idle screen preview backend so DXGI Desktop Duplication and GPU resources
+                // are completely available for the recording pipeline without 0x80070005 (Access Denied) collision
+                if (preview_backend) |*pb| {
+                    pb.deinit();
+                    preview_backend = null;
+                }
                 // Ensure latest UI options are synchronized to pipeline config
                 recorder_pipeline.cfg.video.capture_cursor = ui_state.capture_cursor;
                 recorder_pipeline.cfg.video.fps = @intCast(ui_state.target_fps);
