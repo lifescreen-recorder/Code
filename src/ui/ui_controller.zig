@@ -358,6 +358,9 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
                     } else |_| {}
                 }
             }
+        } else if (preview_backend != null) {
+            preview_backend.?.deinit();
+            preview_backend = null;
         }
 
         // Handle Settings changes

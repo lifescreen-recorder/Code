@@ -35,6 +35,7 @@ pub const VideoEncoderConfig = extern struct {
 extern "c" fn ffmpeg_bridge_probe_encoders() callconv(.c) u32;
 extern "c" fn ffmpeg_encoder_create(cfg: *const VideoEncoderConfig, callback: PacketCallback, user_data: ?*anyopaque) callconv(.c) ?*anyopaque;
 extern "c" fn ffmpeg_encoder_send_d3d11_texture(ctx: *anyopaque, d3d11_texture: *anyopaque, pts_nanos: i64) callconv(.c) c_int;
+extern "c" fn ffmpeg_encoder_repeat_last_frame(ctx: *anyopaque, pts_nanos: i64) callconv(.c) c_int;
 extern "c" fn ffmpeg_encoder_send_cpu_frame(ctx: *anyopaque, bgra_data: [*]const u8, linesize: u32, pts_nanos: i64) callconv(.c) c_int;
 extern "c" fn ffmpeg_encoder_flush(ctx: *anyopaque) callconv(.c) c_int;
 extern "c" fn ffmpeg_encoder_destroy(ctx: *anyopaque) callconv(.c) void;
@@ -151,6 +152,11 @@ pub const FfmpegEncoder = struct {
 
     pub fn sendD3D11Texture(self: *FfmpegEncoder, texture: *anyopaque, pts_nanos: u64) !void {
         const ret = ffmpeg_encoder_send_d3d11_texture(self.handle, texture, @intCast(pts_nanos));
+        if (ret < 0) return error.EncodeFrameFailed;
+    }
+
+    pub fn repeatLastFrame(self: *FfmpegEncoder, pts_nanos: u64) !void {
+        const ret = ffmpeg_encoder_repeat_last_frame(self.handle, @intCast(pts_nanos));
         if (ret < 0) return error.EncodeFrameFailed;
     }
 

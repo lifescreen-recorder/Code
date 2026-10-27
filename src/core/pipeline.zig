@@ -27,7 +27,7 @@ extern "user32" fn SetThreadDesktop(hDesktop: ?*anyopaque) callconv(.winapi) i32
 extern "user32" fn CloseDesktop(hDesktop: ?*anyopaque) callconv(.winapi) i32;
 
 pub const Pipeline = struct {
-    pub const FrameRing = ring_buffer.SpscRingBuffer(types.VideoFrame, 256);
+    pub const FrameRing = ring_buffer.SpscRingBuffer(types.VideoFrame, 16);
 
     allocator: std.mem.Allocator,
     cfg: config.Config,
@@ -250,8 +250,8 @@ pub const Pipeline = struct {
                     app_window.imgui_update_preview_d3d11(frame.gpu_texture_ptr, @intCast(frame.width), @intCast(frame.height));
                 }
 
-                // Real-time live pacing: keep buffer depth <= 16 frames (allows absorbing I-frame encode bursts)
-                while (self.frame_ring.available() >= 16) {
+                // Real-time low-RAM live pacing: cap queue depth at 4 frames
+                while (self.frame_ring.available() >= 4) {
                     _ = self.frame_ring.tryPop();
                     _ = self.stats.dropped_frames.fetchAdd(1, .monotonic);
                 }
@@ -261,14 +261,14 @@ pub const Pipeline = struct {
                 }
                 frame_idx += 1;
             } else if (last_valid_frame) |prev| {
-                // Adaptive VFR keepalive: only inject duplicate frame if at least 100ms elapsed
-                // to maintain video player container sync without wasting GPU encoder cycles on static screens
-                const last_pts = prev.pts_nanos;
-                if (real_pts_nanos >= last_pts + 100_000_000 and self.frame_ring.available() == 0) {
+                // Zero-cost CFR pacing: emit lightweight repeat token (0 GPU/DMA copy) so 30/60 FPS stays 100% locked
+                if (self.frame_ring.available() == 0) {
                     var repeat_frame = prev;
                     repeat_frame.pts_nanos = real_pts_nanos;
                     repeat_frame.frame_index = frame_idx;
+                    repeat_frame.is_repeat = true;
 
+                    last_valid_frame.?.pts_nanos = real_pts_nanos;
                     _ = self.stats.captured_frames.fetchAdd(1, .monotonic);
                     if (!self.frame_ring.tryPush(repeat_frame)) {
                         _ = self.stats.dropped_frames.fetchAdd(1, .monotonic);
@@ -294,7 +294,11 @@ pub const Pipeline = struct {
         while (self.encoder_active.load(.acquire) or self.frame_ring.available() > 0) {
 
             if (self.frame_ring.tryPop()) |frame| {
-                if (frame.gpu_texture_ptr) |tex| {
+                if (frame.is_repeat) {
+                    if (self.enc) |*e| {
+                        e.repeatLastFrame(frame.pts_nanos) catch {};
+                    }
+                } else if (frame.gpu_texture_ptr) |tex| {
                     if (self.enc) |*e| {
                         e.sendD3D11Texture(tex, frame.pts_nanos) catch |err| {
                             log.warn("Send D3D11 texture failed: {s}", .{@errorName(err)});
@@ -312,7 +316,7 @@ pub const Pipeline = struct {
     }
 
     const AudioFifo = struct {
-        buffer: [65536]f32 = undefined,
+        buffer: [16384]f32 = undefined,
         head: usize = 0,
         tail: usize = 0,
         count: usize = 0,

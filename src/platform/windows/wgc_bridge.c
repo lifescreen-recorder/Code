@@ -293,7 +293,7 @@ static WgcCapture* wgc_create_internal(IGraphicsCaptureItem *item, void* d3d_dev
     // Create FreeThreaded frame pool (DirectXPixelFormat_B8G8R8A8UIntNormalized = 87)
     // Use 4 buffers so WGC never stalls the application or DWM compositor!
     IDirect3D11CaptureFramePool *framePool = NULL;
-    hr = poolStatics->lpVtbl->CreateFreeThreaded(poolStatics, winrt_device, 87, 4, item_size, (void**)&framePool);
+    hr = poolStatics->lpVtbl->CreateFreeThreaded(poolStatics, winrt_device, 87, 2, item_size, (void**)&framePool);
     poolStatics->lpVtbl->base.Release((IInspectable_Local*)poolStatics);
     if (FAILED(hr) || !framePool) {
         fprintf(stderr, "[WGC] CreateFreeThreaded failed: 0x%08X (size: %dx%d)\n", (unsigned int)hr, (int)item_size.Width, (int)item_size.Height);
@@ -443,6 +443,15 @@ bool wgc_capture_acquire_frame(WgcCapture* cap, void* dest_texture, uint32_t tim
             if (SUCCEEDED(hr) && frame) break;
         }
         if (!frame) return false;
+    }
+
+    // Drain any older queued frames in the pool so we always grab the latest frame
+    // (critical when recording 60/144Hz games like CS2 at a smooth 30 FPS)
+    IDirect3D11CaptureFrame *newer_frame = NULL;
+    while (SUCCEEDED(cap->frame_pool->lpVtbl->TryGetNextFrame(cap->frame_pool, (void**)&newer_frame)) && newer_frame) {
+        frame->lpVtbl->base.Release((IInspectable_Local*)frame);
+        frame = newer_frame;
+        newer_frame = NULL;
     }
 
     // Get ContentSize

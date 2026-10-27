@@ -67,7 +67,8 @@ static ID3D11Texture2D*          g_pPreviewTexture = NULL;
 static ID3D11ShaderResourceView* g_pPreviewSRV = NULL;
 static int                       g_previewWidth = 0;
 static int                       g_previewHeight = 0;
-static bool                      g_previewEnabled = true;
+static bool                      g_previewEnabled = false;
+static bool                      g_skipCurrentFrameRender = false;
 static bool                      g_previewPaused = false;
 static uint64_t                  g_previewFrameCount = 0;
 static CRITICAL_SECTION          g_previewCs;
@@ -303,10 +304,7 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         case WM_SIZE:
             if (g_pd3dDevice != NULL && wParam != SIZE_MINIMIZED) {
-                if (g_pPreviewSRV) { g_pPreviewSRV->Release(); g_pPreviewSRV = NULL; }
-    if (g_pPreviewTexture) { g_pPreviewTexture->Release(); g_pPreviewTexture = NULL; }
-    if (g_previewCsInit) { DeleteCriticalSection(&g_previewCs); g_previewCsInit = false; }
-    cleanup_render_target();
+                cleanup_render_target();
                 g_pSwapChain->ResizeBuffers(0, (UINT)LOWORD(lParam), (UINT)HIWORD(lParam), DXGI_FORMAT_UNKNOWN, 0);
                 create_render_target();
             }
@@ -560,6 +558,20 @@ bool imgui_window_poll_events(void) {
 }
 
 void imgui_window_begin_frame(void) {
+    if (g_hWnd && IsIconic(g_hWnd)) {
+        g_skipCurrentFrameRender = true;
+        return;
+    }
+    if (g_hWnd && GetForegroundWindow() != g_hWnd) {
+        static DWORD s_lastBgFrameTick = 0;
+        DWORD now = GetTickCount();
+        if (now - s_lastBgFrameTick < 150) {
+            g_skipCurrentFrameRender = true;
+            return;
+        }
+        s_lastBgFrameTick = now;
+    }
+    g_skipCurrentFrameRender = false;
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
@@ -610,15 +622,22 @@ void imgui_window_render_ui(UiState* state) {
     // Apply hotkey preset if changed
     apply_hotkey_preset(state->hotkey_start_stop_preset);
 
-    // Update On-Screen Overlay window
+    // Update On-Screen Overlay window (strictly 1 Hz repaint when second changes to never interrupt game DWM flip)
     if (g_hOverlayWnd) {
         if (is_recording && state->show_overlay_indicator) {
             int total_s = (int)state->duration_sec;
-            g_overlayHours = total_s / 3600;
-            g_overlayMins = (total_s % 3600) / 60;
-            g_overlaySecs = total_s % 60;
-            g_overlayFps = (int)(state->current_fps > 0.0f ? state->current_fps : (float)state->target_fps);
-            InvalidateRect(g_hOverlayWnd, NULL, FALSE);
+            int disp_fps = (int)(state->current_fps > 0.0f ? state->current_fps : (float)state->target_fps);
+            static int s_lastOverlaySec = -1;
+            static int s_lastOverlayFps = -1;
+            if (total_s != s_lastOverlaySec || disp_fps != s_lastOverlayFps) {
+                s_lastOverlaySec = total_s;
+                s_lastOverlayFps = disp_fps;
+                g_overlayHours = total_s / 3600;
+                g_overlayMins = (total_s % 3600) / 60;
+                g_overlaySecs = total_s % 60;
+                g_overlayFps = disp_fps;
+                InvalidateRect(g_hOverlayWnd, NULL, FALSE);
+            }
             if (!IsWindowVisible(g_hOverlayWnd)) {
                 SetWindowDisplayAffinity(g_hOverlayWnd, WDA_EXCLUDEFROMCAPTURE);
                 ShowWindow(g_hOverlayWnd, SW_SHOWNOACTIVATE);
@@ -630,6 +649,12 @@ void imgui_window_render_ui(UiState* state) {
         }
     }
 
+    if (g_skipCurrentFrameRender) {
+        g_previewEnabled = false;
+        return;
+    }
+
+    bool preview_tab_active = false;
     int win_w = 960, win_h = 700;
     imgui_window_get_size(&win_w, &win_h);
 
@@ -674,7 +699,7 @@ void imgui_window_render_ui(UiState* state) {
     {
         ImGui::TextColored(ImVec4(0.22f, 0.65f, 0.98f, 1.00f), "LifeScreen");
         ImGui::SameLine();
-        ImGui::TextDisabled("v0.3.0-alpha | Zero-Copy GPU Recorder");
+        ImGui::TextDisabled(is_uk ? "v0.3.0 | Zero-Copy GPU & Eco 1GB RAM Engine" : "v0.3.0 | Zero-Copy GPU & Eco 1GB RAM Engine");
 
         const char* status_badge_text = is_recording
             ? (state->state == 3 ? (is_uk ? "[ПАУЗА]" : "[PAUSED]") : (is_uk ? "[ЗАПИС ТРИВАЄ]" : "[RECORDING]"))
@@ -950,14 +975,31 @@ void imgui_window_render_ui(UiState* state) {
                     state->action_settings_changed = true;
                 }
 
-                // Column 3: Encoder Badge
+                // Column 3: Quick FPS Selector + 1-Click Eco 30 FPS Mode
                 ImGui::SameLine((col3_w + spacing_x) * 2.0f);
-                const char* enc_name = (state->encoder_backend == 0) ? "NVIDIA NVENC" :
-                    ((state->encoder_backend == 1) ? "AMD AMF" :
-                    ((state->encoder_backend == 2) ? "Intel QuickSync (GPU)" : "CPU (libx264)"));
-                ImGui::TextDisabled("%s", is_uk ? "Енкодер:" : "Encoder:");
+                ImGui::TextDisabled("FPS:");
                 ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.25f, 0.85f, 0.45f, 1.0f), "%s", enc_name);
+                const char* quick_fps_items[] = { "30 FPS (Eco/Smooth)", "60 FPS (High)", "120 FPS" };
+                int q_fps_idx = (state->target_fps <= 30) ? 0 : ((state->target_fps <= 60) ? 1 : 2);
+                ImGui::SetNextItemWidth(col3_w * 0.52f);
+                if (ImGui::Combo("##QuickFps", &q_fps_idx, quick_fps_items, 3)) {
+                    int max_hz = get_monitor_refresh_rate();
+                    int chosen = (q_fps_idx == 0) ? 30 : ((q_fps_idx == 1) ? 60 : 120);
+                    if (chosen > max_hz) chosen = max_hz;
+                    state->target_fps = chosen;
+                    state->action_settings_changed = true;
+                }
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f, 0.48f, 0.30f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.60f, 0.38f, 1.0f));
+                if (ImGui::Button(is_uk ? "Eco 30FPS" : "Eco 30FPS", ImVec2(col3_w * 0.32f, 24))) {
+                    state->target_fps = 30;
+                    state->encoder_preset = 0; // Ultrafast
+                    state->rate_control = 2;   // CQP
+                    state->quality_cqp = 23;
+                    state->action_settings_changed = true;
+                }
+                ImGui::PopStyleColor(2);
 
                 ImGui::Spacing();
                 if (h_row2 > 160.0f) ImGui::Spacing();
@@ -1527,12 +1569,22 @@ void imgui_window_render_ui(UiState* state) {
     }
 
     ImGui::End();
+
+    bool should_enable_preview = preview_tab_active && !g_previewPaused && !(g_hWnd && IsIconic(g_hWnd));
+    if (!should_enable_preview && g_previewEnabled) {
+        if (g_previewCsInit) EnterCriticalSection(&g_previewCs);
+        if (g_pPreviewSRV) { g_pPreviewSRV->Release(); g_pPreviewSRV = NULL; }
+        if (g_pPreviewTexture) { g_pPreviewTexture->Release(); g_pPreviewTexture = NULL; }
+        g_previewWidth = 0;
+        g_previewHeight = 0;
+        if (g_previewCsInit) LeaveCriticalSection(&g_previewCs);
+    }
+    g_previewEnabled = should_enable_preview;
 }
 
 void imgui_window_present(void) {
-    if (g_hWnd && IsIconic(g_hWnd)) {
-        // Minimized: do not render ImGui draw list, sleep 40ms to keep CPU near 0.0%
-        Sleep(40);
+    if (g_skipCurrentFrameRender || (g_hWnd && IsIconic(g_hWnd))) {
+        Sleep(30);
         return;
     }
 

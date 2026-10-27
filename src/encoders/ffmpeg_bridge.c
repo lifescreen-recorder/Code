@@ -17,7 +17,7 @@
 #include <libswresample/swresample.h>
 #include <libavutil/audio_fifo.h>
 
-#define STAGING_BUFFERS 4
+#define STAGING_BUFFERS 2
 
 
 struct VideoEncoderContext {
@@ -36,6 +36,7 @@ struct VideoEncoderContext {
     uint32_t src_height;
     uint32_t fps;
     int is_hardware;
+    ID3D11Device *d3d11_device;
     ID3D11DeviceContext *d3d11_context;
 
     // Hardware D3D11 Video Processor (Zero-Copy GPU 4K BGRA -> NV12 color conversion)
@@ -129,7 +130,7 @@ uint32_t ffmpeg_bridge_probe_encoders(void) {
 
     if (avcodec_find_encoder_by_name("libx264"))    caps |= ENCODER_CAP_SW_X264;
     if (avcodec_find_encoder_by_name("libx265"))    caps |= ENCODER_CAP_SW_X265;
-
+    SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
     return caps;
 }
 
@@ -257,7 +258,7 @@ VideoEncoderContext* ffmpeg_encoder_create(const VideoEncoderConfig *cfg, Packet
                     frames_ctx->sw_format = AV_PIX_FMT_NV12;
                     frames_ctx->width = cfg->width;
                     frames_ctx->height = cfg->height;
-                    frames_ctx->initial_pool_size = 4;
+                    frames_ctx->initial_pool_size = 2;
                     if (av_hwframe_ctx_init(ctx->hw_frames_ref) >= 0) {
                         ctx->codec_ctx->hw_frames_ctx = av_buffer_ref(ctx->hw_frames_ref);
                     }
@@ -331,13 +332,18 @@ VideoEncoderContext* ffmpeg_encoder_create(const VideoEncoderConfig *cfg, Packet
         av_opt_set(ctx->codec_ctx->priv_data, "look_ahead", "0", 0);
         av_opt_set(ctx->codec_ctx->priv_data, "forced_idr", "1", 0);
     } else if (!is_hw) {
+        SYSTEM_INFO sysinfo;
+        GetSystemInfo(&sysinfo);
+        int cpu_threads = (int)sysinfo.dwNumberOfProcessors;
+        int enc_threads = (cpu_threads > 4) ? 4 : (cpu_threads > 2 ? cpu_threads - 1 : 2);
+        ctx->codec_ctx->thread_count = enc_threads;
         ctx->codec_ctx->thread_type = FF_THREAD_SLICE;
         av_opt_set(ctx->codec_ctx->priv_data, "tune", "zerolatency", 0);
         av_opt_set(ctx->codec_ctx->priv_data, "colorprim", "bt709", 0);
         av_opt_set(ctx->codec_ctx->priv_data, "transfer", "bt709", 0);
         av_opt_set(ctx->codec_ctx->priv_data, "colmatrix", "bt709", 0);
         av_opt_set(ctx->codec_ctx->priv_data, "fullrange", (cfg->color_range == 1) ? "on" : "off", 0);
-        av_opt_set(ctx->codec_ctx->priv_data, "x264-params", "no-mbtree=1:rc-lookahead=0:sync-lookahead=0:b-adapt=0", 0);
+        av_opt_set(ctx->codec_ctx->priv_data, "x264-params", "ref=1:no-mbtree=1:rc-lookahead=0:sync-lookahead=0:b-adapt=0:aq-mode=0:subme=1:me=dia:trellis=0", 0);
     }
 
     // Initialize D3D11 Video Processor & Staging Textures
@@ -394,7 +400,10 @@ VideoEncoderContext* ffmpeg_encoder_create(const VideoEncoderConfig *cfg, Packet
 
                             if (SUCCEEDED(hr_ov) && ctx->video_output_view) {
                                 ctx->use_gpu_nv12_staging = true;
-                                printf("[FFmpeg] Hardware D3D11 Video Processor initialized (0%% CPU 4K BGRA->NV12 GPU conversion enabled)\n");
+                                if (!ctx->is_hardware) {
+                                    ctx->codec_ctx->pix_fmt = AV_PIX_FMT_NV12;
+                                }
+                                printf("[FFmpeg] Hardware D3D11 Video Processor initialized (0%% CPU BGRA->NV12 GPU conversion enabled)\n");
                             }
                         }
                     }
@@ -402,19 +411,7 @@ VideoEncoderContext* ffmpeg_encoder_create(const VideoEncoderConfig *cfg, Packet
             }
         }
 
-        // 2. Allocate staging textures (triple/quad buffered for asynchronous non-blocking readback)
-        D3D11_TEXTURE2D_DESC sdesc = {0};
-        sdesc.Width = ctx->use_gpu_nv12_staging ? ctx->width : ctx->src_width;
-        sdesc.Height = ctx->use_gpu_nv12_staging ? ctx->height : ctx->src_height;
-        sdesc.MipLevels = 1;
-        sdesc.ArraySize = 1;
-        sdesc.Format = ctx->use_gpu_nv12_staging ? DXGI_FORMAT_NV12 : DXGI_FORMAT_B8G8R8A8_UNORM;
-        sdesc.SampleDesc.Count = 1;
-        sdesc.Usage = D3D11_USAGE_STAGING;
-        sdesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        for (int i = 0; i < STAGING_BUFFERS; i++) {
-            dev->lpVtbl->CreateTexture2D(dev, &sdesc, NULL, &ctx->staging_textures[i]);
-        }
+        ctx->d3d11_device = dev;
         ctx->staging_index = 0;
         ctx->staging_count = 0;
     }
@@ -436,7 +433,8 @@ VideoEncoderContext* ffmpeg_encoder_create(const VideoEncoderConfig *cfg, Packet
                 ctx->codec_ctx->framerate = (AVRational){(int)cfg->fps, 1};
                 ctx->codec_ctx->gop_size = (int)(cfg->fps * (cfg->keyframe_interval_secs ? cfg->keyframe_interval_secs : 2));
                 ctx->codec_ctx->max_b_frames = 0;
-                ctx->codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+                ctx->codec_ctx->pix_fmt = ctx->use_gpu_nv12_staging ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
+                ctx->codec_ctx->thread_count = 2;
                 ctx->codec_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
                 ctx->codec_ctx->colorspace = AVCOL_SPC_BT709;
                 ctx->codec_ctx->color_range = (cfg->color_range == 1) ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
@@ -1174,7 +1172,22 @@ int ffmpeg_encoder_send_d3d11_texture(VideoEncoderContext *ctx, void *d3d11_text
     }
 
     // Step 3: Ultra-Fast Asynchronous Ring-Buffer Staging Pipeline
-    // Zero-CPU overhead if use_gpu_nv12_staging is true (only memcpy of already converted NV12 planes!)
+    // Lazily allocate double-buffered staging textures only when direct D3D11VA hardware path is not used
+    if (!ctx->staging_textures[0] && ctx->d3d11_device) {
+        D3D11_TEXTURE2D_DESC sdesc = {0};
+        sdesc.Width = ctx->use_gpu_nv12_staging ? ctx->width : ctx->src_width;
+        sdesc.Height = ctx->use_gpu_nv12_staging ? ctx->height : ctx->src_height;
+        sdesc.MipLevels = 1;
+        sdesc.ArraySize = 1;
+        sdesc.Format = ctx->use_gpu_nv12_staging ? DXGI_FORMAT_NV12 : DXGI_FORMAT_B8G8R8A8_UNORM;
+        sdesc.SampleDesc.Count = 1;
+        sdesc.Usage = D3D11_USAGE_STAGING;
+        sdesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        for (int i = 0; i < STAGING_BUFFERS; i++) {
+            ctx->d3d11_device->lpVtbl->CreateTexture2D(ctx->d3d11_device, &sdesc, NULL, &ctx->staging_textures[i]);
+        }
+    }
+
     if (ctx->staging_textures[0] && ctx->d3d11_context) {
         int write_idx = ctx->staging_index;
         ctx->staging_pts[write_idx] = pts_nanos;
@@ -1270,6 +1283,26 @@ int ffmpeg_encoder_send_d3d11_texture(VideoEncoderContext *ctx, void *d3d11_text
     }
 
     return -1;
+}
+
+int ffmpeg_encoder_repeat_last_frame(VideoEncoderContext *ctx, int64_t pts_nanos) {
+    if (!ctx || !ctx->codec_ctx) return -1;
+
+    // Zero-cost hardware repeat: re-send existing GPU NV12 texture in VRAM
+    if (ctx->is_hardware && ctx->hw_frames_ref && ctx->gpu_nv12_texture && ctx->hw_frame->width > 0) {
+        ctx->hw_frame->pts = get_next_monotonic_pts(ctx, pts_nanos);
+        if (avcodec_send_frame(ctx->codec_ctx, ctx->hw_frame) == 0) {
+            drain_encoder_packets(ctx);
+            return 0;
+        }
+    }
+
+    // Zero-cost software/staging repeat: re-send already converted sw_frame in RAM (0 GPU copies, 0 DMA readbacks, 0 memcpy)
+    if (ctx->sw_frame && ctx->sw_frame->width > 0 && ctx->sw_frame->data[0]) {
+        return encode_sw_frame(ctx, pts_nanos);
+    }
+
+    return 0;
 }
 
 int ffmpeg_encoder_send_cpu_frame(VideoEncoderContext *ctx, const uint8_t *bgra_data, uint32_t linesize, int64_t pts_nanos) {
@@ -1377,6 +1410,8 @@ void ffmpeg_encoder_destroy(VideoEncoderContext *ctx) {
     if (ctx->hw_frame) av_frame_free(&ctx->hw_frame);
     if (ctx->sws_ctx) sws_freeContext(ctx->sws_ctx);
     free(ctx);
+    SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
+    SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
 }
 
 // ----------------------------------------------------------------------------
@@ -1409,7 +1444,7 @@ MuxerContext* ffmpeg_muxer_create(
     }
 
     // Cap maximum interleaving delay to 1 second (prevents unbounded memory growth)
-    m->fmt_ctx->max_interleave_delta = 1000000;
+    m->fmt_ctx->max_interleave_delta = 200000;
 
     // Configure faststart for MP4/MOV containers
     if (m->fmt_ctx->oformat && (strstr(m->fmt_ctx->oformat->name, "mp4") || strstr(m->fmt_ctx->oformat->name, "mov"))) {
@@ -1509,7 +1544,7 @@ MuxerContext* ffmpeg_muxer_create(
     if (!(m->fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
         AVDictionary *io_opts = NULL;
         // 2026 Next-Gen High-Throughput NVMe Direct Buffer (256 KB block write alignment)
-        av_dict_set(&io_opts, "buffer_size", "262144", 0);
+        av_dict_set(&io_opts, "buffer_size", "65536", 0);
         ret = avio_open2(&m->fmt_ctx->pb, output_file, AVIO_FLAG_WRITE, NULL, &io_opts);
         av_dict_free(&io_opts);
         if (ret < 0) {

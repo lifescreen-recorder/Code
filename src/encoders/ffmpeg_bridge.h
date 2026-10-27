@@ -82,6 +82,7 @@ uint32_t ffmpeg_bridge_probe_encoders(void);
 // 2. Video Encoder
 VideoEncoderContext* ffmpeg_encoder_create(const VideoEncoderConfig *config, PacketCallback callback, void *user_data);
 int ffmpeg_encoder_send_d3d11_texture(VideoEncoderContext *ctx, void *d3d11_texture, int64_t pts_nanos);
+int ffmpeg_encoder_repeat_last_frame(VideoEncoderContext *ctx, int64_t pts_nanos);
 int ffmpeg_encoder_send_cpu_frame(VideoEncoderContext *ctx, const uint8_t *bgra_data, uint32_t linesize, int64_t pts_nanos);
 int ffmpeg_encoder_flush(VideoEncoderContext *ctx);
 void ffmpeg_encoder_destroy(VideoEncoderContext *ctx);

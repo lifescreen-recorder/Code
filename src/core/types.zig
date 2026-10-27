@@ -37,6 +37,7 @@ pub const VideoFrame = struct {
     gpu_shared_handle: ?usize = null,
     /// CPU buffer fallback if GPU zero-copy is unavailable
     cpu_data: ?[]const u8 = null,
+    is_repeat: bool = false,
 };
 
 /// Audio sample format
