@@ -384,7 +384,22 @@ static void setup_modern_dark_theme(void) {
     colors[ImGuiCol_PlotHistogramHovered]  = ImVec4(0.22f, 0.82f, 0.48f, 1.00f);
 }
 
+static void ls_dbg(const char* msg) {
+    char path[MAX_PATH];
+    DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", path, MAX_PATH - 32);
+    if (n == 0 || n > MAX_PATH - 32) return;
+    strcat(path, "\\LifeScreen");
+    CreateDirectoryA(path, NULL);
+    strcat(path, "\\startup.log");
+    FILE* f = fopen(path, "a");
+    if (!f) return;
+    SYSTEMTIME st; GetLocalTime(&st);
+    fprintf(f, "[%02d:%02d:%02d.%03d] [ui] %s\n", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, msg);
+    fclose(f);
+}
+
 bool imgui_window_create(int width, int height, const char* title) {
+    ls_dbg("imgui_window_create");
     WNDCLASSEXW wc = {
         sizeof(WNDCLASSEXW),
         CS_CLASSDC,
@@ -546,6 +561,7 @@ bool imgui_window_create(int width, int height, const char* title) {
 }
 
 bool imgui_window_poll_events(void) {
+    { static int s_first = 0; if (!s_first) { s_first = 1; ls_dbg("main loop reached (first poll_events)"); } }
     MSG msg;
     while (PeekMessageW(&msg, NULL, 0U, 0U, PM_REMOVE)) {
         TranslateMessage(&msg);
@@ -558,6 +574,7 @@ bool imgui_window_poll_events(void) {
 }
 
 void imgui_window_begin_frame(void) {
+    { static int s_bf = 0; if (s_bf < 3) { s_bf++; char b[96]; snprintf(b, sizeof(b), "begin_frame #%d iconic=%d foreground=%d", s_bf, (int)IsIconic(g_hWnd), (int)(GetForegroundWindow() == g_hWnd)); ls_dbg(b); } }
     if (g_hWnd && IsIconic(g_hWnd)) {
         g_skipCurrentFrameRender = true;
         return;
@@ -664,22 +681,22 @@ void imgui_window_render_ui(UiState* state) {
     // Dynamic Activity Logger state transitions
     if (!g_uiLogsInitialized) {
         g_uiLogsInitialized = true;
-        add_ui_log(is_uk ? "LifeScreen v0.3.0 ініціалізовано. Zero-Copy GPU Pipeline готовий." : "LifeScreen v0.3.0 initialized. Zero-Copy GPU Pipeline ready.", ImVec4(0.3f, 0.85f, 0.45f, 1.0f));
-        add_ui_log(is_uk ? "Апаратний енкодер: Intel QuickSync / NVIDIA NVENC активний." : "Hardware encoder: Intel QuickSync / NVIDIA NVENC active.", ImVec4(0.25f, 0.65f, 1.0f, 1.0f));
-        add_ui_log(is_uk ? "WASAPI Loopback аудіо підсистема підключена." : "WASAPI Loopback audio subsystem connected.", ImVec4(0.8f, 0.82f, 0.88f, 1.0f));
-        add_ui_log(is_uk ? "Система готова до запису. Натисніть [F9] для старту." : "System ready to record. Press [F9] to start.", ImVec4(1.0f, 0.85f, 0.35f, 1.0f));
+        add_ui_log(is_uk ? "LifeScreen v0.3.0 ������������. Zero-Copy GPU Pipeline �������." : "LifeScreen v0.3.0 initialized. Zero-Copy GPU Pipeline ready.", ImVec4(0.3f, 0.85f, 0.45f, 1.0f));
+        add_ui_log(is_uk ? "��������� �������: Intel QuickSync / NVIDIA NVENC ��������." : "Hardware encoder: Intel QuickSync / NVIDIA NVENC active.", ImVec4(0.25f, 0.65f, 1.0f, 1.0f));
+        add_ui_log(is_uk ? "WASAPI Loopback ���� ��������� ���������." : "WASAPI Loopback audio subsystem connected.", ImVec4(0.8f, 0.82f, 0.88f, 1.0f));
+        add_ui_log(is_uk ? "������� ������ �� ������. �������� [F9] ��� ������." : "System ready to record. Press [F9] to start.", ImVec4(1.0f, 0.85f, 0.35f, 1.0f));
     }
 
     if (g_lastUiState != state->state) {
         if (state->state == 2 && g_lastUiState != 3) {
-            add_ui_log(is_uk ? "[REC] Запис відео розпочато (Zero-Copy GPU Pipeline)!" : "[REC] Video recording started (Zero-Copy GPU Pipeline)!", ImVec4(1.0f, 0.35f, 0.35f, 1.0f));
+            add_ui_log(is_uk ? "[REC] ����� ���� ��������� (Zero-Copy GPU Pipeline)!" : "[REC] Video recording started (Zero-Copy GPU Pipeline)!", ImVec4(1.0f, 0.35f, 0.35f, 1.0f));
         } else if (state->state == 3) {
-            add_ui_log(is_uk ? "[PAUSE] Запис тимчасово призупинено." : "[PAUSE] Recording paused.", ImVec4(1.0f, 0.7f, 0.2f, 1.0f));
+            add_ui_log(is_uk ? "[PAUSE] ����� ��������� �����������." : "[PAUSE] Recording paused.", ImVec4(1.0f, 0.7f, 0.2f, 1.0f));
         } else if (state->state == 2 && g_lastUiState == 3) {
-            add_ui_log(is_uk ? "[RESUME] Запис відновлено." : "[RESUME] Recording resumed.", ImVec4(0.3f, 0.85f, 0.45f, 1.0f));
+            add_ui_log(is_uk ? "[RESUME] ����� ���������." : "[RESUME] Recording resumed.", ImVec4(0.3f, 0.85f, 0.45f, 1.0f));
         } else if (state->state == 0 && (g_lastUiState == 2 || g_lastUiState == 3)) {
             char stop_msg[256];
-            snprintf(stop_msg, sizeof(stop_msg), is_uk ? "[STOP] Запис успішно збережено! Розмір: %.1f MB" : "[STOP] Recording saved successfully! Size: %.1f MB", (double)state->file_bytes / (1024.0 * 1024.0));
+            snprintf(stop_msg, sizeof(stop_msg), is_uk ? "[STOP] ����� ������ ���������! �����: %.1f MB" : "[STOP] Recording saved successfully! Size: %.1f MB", (double)state->file_bytes / (1024.0 * 1024.0));
             add_ui_log(stop_msg, ImVec4(0.3f, 0.85f, 0.45f, 1.0f));
         }
         g_lastUiState = state->state;
@@ -702,8 +719,8 @@ void imgui_window_render_ui(UiState* state) {
         ImGui::TextDisabled(is_uk ? "v0.3.0 | Zero-Copy GPU & Eco 1GB RAM Engine" : "v0.3.0 | Zero-Copy GPU & Eco 1GB RAM Engine");
 
         const char* status_badge_text = is_recording
-            ? (state->state == 3 ? (is_uk ? "[ПАУЗА]" : "[PAUSED]") : (is_uk ? "[ЗАПИС ТРИВАЄ]" : "[RECORDING]"))
-            : (is_uk ? "[ГОТОВИЙ]" : "[READY]");
+            ? (state->state == 3 ? (is_uk ? "[�����]" : "[PAUSED]") : (is_uk ? "[����� ������]" : "[RECORDING]"))
+            : (is_uk ? "[�������]" : "[READY]");
         ImVec4 status_badge_col = is_recording
             ? (state->state == 3 ? ImVec4(0.96f, 0.70f, 0.15f, 1.0f) : ImVec4(0.96f, 0.25f, 0.30f, 1.0f))
             : ImVec4(0.22f, 0.80f, 0.45f, 1.0f);
@@ -718,7 +735,7 @@ void imgui_window_render_ui(UiState* state) {
 
     if (ImGui::BeginTabBar("MainTabBar")) {
         // TAB 1: MAIN RECORDER DASHBOARD
-        if (ImGui::BeginTabItem(is_uk ? "  Головна  " : "  Recorder  ")) {
+        if (ImGui::BeginTabItem(is_uk ? "  �������  " : "  Recorder  ")) {
             ImGui::Spacing();
 
             float total_w = ImGui::GetContentRegionAvail().x;
@@ -745,14 +762,14 @@ void imgui_window_render_ui(UiState* state) {
             float col_w = (total_w - 16.0f) * 0.5f;
 
             // ==========================================
-            // TOP ROW: [1. ДЖЕРЕЛО ВІДЕО] and [2. АУДІО ТА ЗВУК]
+            // TOP ROW: [1. ������� ²���] and [2. ��Ĳ� �� ����]
             // ==========================================
 
             // LEFT CARD: 1. Video Source
             ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.14f, 0.15f, 0.18f, 1.00f));
             ImGui::BeginChild("SourceCard", ImVec2(col_w, h_row1), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
             {
-                ImGui::TextColored(ImVec4(0.20f, 0.65f, 1.00f, 1.00f), "%s", is_uk ? "1. ДЖЕРЕЛО ВІДЕО ТА ДИСПЛЕЙ" : "1. VIDEO SOURCE & DISPLAY");
+                ImGui::TextColored(ImVec4(0.20f, 0.65f, 1.00f, 1.00f), "%s", is_uk ? "1. ������� ²��� �� �������" : "1. VIDEO SOURCE & DISPLAY");
                 ImGui::Spacing();
                 if (h_row1 > 260.0f) ImGui::Spacing();
 
@@ -763,23 +780,23 @@ void imgui_window_render_ui(UiState* state) {
                 float btn_w = (col_w - 38.0f) / 3.0f;
                 float btn_h = (h_row1 > 260.0f) ? 36.0f : 30.0f;
                 if (is_screen) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.53f, 0.90f, 1.00f));
-                if (ImGui::Button(is_uk ? "Екран" : "Screen", ImVec2(btn_w, btn_h))) state->capture_type = 0;
+                if (ImGui::Button(is_uk ? "�����" : "Screen", ImVec2(btn_w, btn_h))) state->capture_type = 0;
                 if (is_screen) ImGui::PopStyleColor();
 
                 ImGui::SameLine();
                 if (is_window) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.53f, 0.90f, 1.00f));
-                if (ImGui::Button(is_uk ? "Вікно" : "Window", ImVec2(btn_w, btn_h))) state->capture_type = 1;
+                if (ImGui::Button(is_uk ? "³���" : "Window", ImVec2(btn_w, btn_h))) state->capture_type = 1;
                 if (is_window) ImGui::PopStyleColor();
 
                 ImGui::SameLine();
                 if (is_game) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.53f, 0.90f, 1.00f));
-                if (ImGui::Button(is_uk ? "Гра" : "Game", ImVec2(btn_w, btn_h))) state->capture_type = 2;
+                if (ImGui::Button(is_uk ? "���" : "Game", ImVec2(btn_w, btn_h))) state->capture_type = 2;
                 if (is_game) ImGui::PopStyleColor();
 
                 ImGui::Spacing();
 
                 if (state->capture_type == 0) {
-                    ImGui::TextDisabled("%s", is_uk ? "Монітор / Дисплей:" : "Display / Monitor:");
+                    ImGui::TextDisabled("%s", is_uk ? "������ / �������:" : "Display / Monitor:");
                     const char* current_mon = (state->monitor_count > 0 && state->selected_monitor < state->monitor_count)
                         ? state->monitor_names[state->selected_monitor] : "Default Display";
                     ImGui::SetNextItemWidth(col_w - 28.0f);
@@ -793,9 +810,9 @@ void imgui_window_render_ui(UiState* state) {
                         ImGui::EndCombo();
                     }
                 } else if (state->capture_type == 1) {
-                    ImGui::TextDisabled("%s", is_uk ? "Цільове вікно:" : "Target Window:");
+                    ImGui::TextDisabled("%s", is_uk ? "ֳ����� ����:" : "Target Window:");
                     const char* current_win = (state->window_count > 0 && state->selected_window < state->window_count)
-                        ? state->window_names[state->selected_window] : (is_uk ? "Виберіть вікно..." : "Select window...");
+                        ? state->window_names[state->selected_window] : (is_uk ? "������� ����..." : "Select window...");
                     ImGui::SetNextItemWidth(col_w - 110.0f);
                     if (ImGui::BeginCombo("##WindowSelect", current_win)) {
                         for (int i = 0; i < state->window_count; i++) {
@@ -807,13 +824,13 @@ void imgui_window_render_ui(UiState* state) {
                         ImGui::EndCombo();
                     }
                     ImGui::SameLine();
-                    if (ImGui::Button(is_uk ? "Оновити" : "Refresh", ImVec2(74, 26))) {
+                    if (ImGui::Button(is_uk ? "�������" : "Refresh", ImVec2(74, 26))) {
                         state->action_refresh_windows_requested = true;
                     }
                 } else {
-                    ImGui::TextDisabled("%s", is_uk ? "Вікно гри / Додаток:" : "Game Window / App:");
+                    ImGui::TextDisabled("%s", is_uk ? "³��� ��� / �������:" : "Game Window / App:");
                     const char* current_win = (state->window_count > 0 && state->selected_window < state->window_count)
-                        ? state->window_names[state->selected_window] : (is_uk ? "Виберіть гру зі списку..." : "Select game window...");
+                        ? state->window_names[state->selected_window] : (is_uk ? "������� ��� � ������..." : "Select game window...");
                     ImGui::SetNextItemWidth(col_w - 110.0f);
                     if (ImGui::BeginCombo("##GameSelect", current_win)) {
                         for (int i = 0; i < state->window_count; i++) {
@@ -825,7 +842,7 @@ void imgui_window_render_ui(UiState* state) {
                         ImGui::EndCombo();
                     }
                     ImGui::SameLine();
-                    if (ImGui::Button(is_uk ? "Оновити" : "Refresh", ImVec2(74, 26))) {
+                    if (ImGui::Button(is_uk ? "�������" : "Refresh", ImVec2(74, 26))) {
                         state->action_refresh_windows_requested = true;
                     }
                 }
@@ -833,11 +850,11 @@ void imgui_window_render_ui(UiState* state) {
                 ImGui::Spacing();
                 if (h_row1 > 260.0f) ImGui::Spacing();
 
-                if (ImGui::Checkbox(is_uk ? "Курсор миші" : "Capture Cursor", &state->capture_cursor)) {
+                if (ImGui::Checkbox(is_uk ? "������ ����" : "Capture Cursor", &state->capture_cursor)) {
                     state->action_settings_changed = true;
                 }
                 ImGui::SameLine(col_w * 0.48f);
-                if (ImGui::Checkbox(is_uk ? "Оверлей (F9)" : "Overlay (F9)", &state->show_overlay_indicator)) {
+                if (ImGui::Checkbox(is_uk ? "������� (F9)" : "Overlay (F9)", &state->show_overlay_indicator)) {
                     state->action_settings_changed = true;
                 }
             }
@@ -850,12 +867,12 @@ void imgui_window_render_ui(UiState* state) {
             ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.14f, 0.15f, 0.18f, 1.00f));
             ImGui::BeginChild("AudioCard", ImVec2(col_w, h_row1), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
             {
-                ImGui::TextColored(ImVec4(0.20f, 0.65f, 1.00f, 1.00f), "%s", is_uk ? "2. АУДІО ТА МІКРОФОН" : "2. AUDIO & MICROPHONE");
+                ImGui::TextColored(ImVec4(0.20f, 0.65f, 1.00f, 1.00f), "%s", is_uk ? "2. ��Ĳ� �� ̲������" : "2. AUDIO & MICROPHONE");
                 ImGui::Spacing();
                 if (h_row1 > 260.0f) ImGui::Spacing();
 
                 // Channel 1: System Audio Checkbox & Device Dropdown
-                if (ImGui::Checkbox(is_uk ? "Звук системи" : "System Audio", &state->record_system_audio)) {
+                if (ImGui::Checkbox(is_uk ? "���� �������" : "System Audio", &state->record_system_audio)) {
                     state->action_settings_changed = true;
                 }
                 ImGui::SameLine();
@@ -884,7 +901,7 @@ void imgui_window_render_ui(UiState* state) {
                 ImGui::SetNextItemWidth(slider_w);
                 int sys_pct = (int)(state->system_volume * 100.0f + 0.5f);
                 char sys_vol_label[32];
-                snprintf(sys_vol_label, sizeof(sys_vol_label), is_uk ? "Гучність: %%d%%%%" : "Volume: %%d%%%%");
+                snprintf(sys_vol_label, sizeof(sys_vol_label), is_uk ? "�������: %%d%%%%" : "Volume: %%d%%%%");
                 if (ImGui::SliderInt("##SysVol", &sys_pct, 0, 150, sys_vol_label)) {
                     state->system_volume = (float)sys_pct / 100.0f;
                     state->action_settings_changed = true;
@@ -897,7 +914,7 @@ void imgui_window_render_ui(UiState* state) {
                 if (h_row1 > 260.0f) ImGui::Spacing();
 
                 // Channel 2: Microphone Checkbox & Device Dropdown
-                if (ImGui::Checkbox(is_uk ? "Мікрофон" : "Microphone", &state->record_microphone)) {
+                if (ImGui::Checkbox(is_uk ? "̳������" : "Microphone", &state->record_microphone)) {
                     state->action_settings_changed = true;
                 }
                 ImGui::SameLine();
@@ -923,7 +940,7 @@ void imgui_window_render_ui(UiState* state) {
                 ImGui::SetNextItemWidth(slider_w);
                 int mic_pct = (int)(state->mic_volume * 100.0f + 0.5f);
                 char mic_vol_label[32];
-                snprintf(mic_vol_label, sizeof(mic_vol_label), is_uk ? "Гучність: %%d%%%%" : "Volume: %%d%%%%");
+                snprintf(mic_vol_label, sizeof(mic_vol_label), is_uk ? "�������: %%d%%%%" : "Volume: %%d%%%%");
                 if (ImGui::SliderInt("##MicVol", &mic_pct, 0, 200, mic_vol_label)) {
                     state->mic_volume = (float)mic_pct / 100.0f;
                     state->action_settings_changed = true;
@@ -938,12 +955,12 @@ void imgui_window_render_ui(UiState* state) {
             ImGui::Spacing();
 
             // ==========================================
-            // MIDDLE ROW: [3. ШВИДКІ НАЛАШТУВАННЯ ТА ПАПКА]
+            // MIDDLE ROW: [3. ����ʲ ������������ �� �����]
             // ==========================================
             ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.14f, 0.15f, 0.18f, 1.00f));
             ImGui::BeginChild("QuickSettingsCard", ImVec2(total_w, h_row2), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
             {
-                ImGui::TextColored(ImVec4(0.20f, 0.65f, 1.00f, 1.00f), "%s", is_uk ? "3. ПАРАМЕТРИ ФАЙЛУ ТА ЗБЕРЕЖЕННЯ" : "3. OUTPUT & STORAGE");
+                ImGui::TextColored(ImVec4(0.20f, 0.65f, 1.00f, 1.00f), "%s", is_uk ? "3. ��������� ����� �� ����������" : "3. OUTPUT & STORAGE");
                 ImGui::Spacing();
                 if (h_row2 > 160.0f) ImGui::Spacing();
 
@@ -952,7 +969,7 @@ void imgui_window_render_ui(UiState* state) {
                 float col3_w = (card_w - (spacing_x * 2.0f)) / 3.0f;
 
                 // Column 1: Format
-                ImGui::TextDisabled("%s", is_uk ? "Формат:" : "Format:");
+                ImGui::TextDisabled("%s", is_uk ? "������:" : "Format:");
                 ImGui::SameLine();
                 const char* quick_formats[] = { "MKV (Crash-Resistant)", "MP4 (Universal)", "MOV" };
                 ImGui::SetNextItemWidth(col3_w - 65.0f);
@@ -962,10 +979,10 @@ void imgui_window_render_ui(UiState* state) {
 
                 // Column 2: Resolution
                 ImGui::SameLine(col3_w + spacing_x);
-                ImGui::TextDisabled("%s", is_uk ? "Якість:" : "Quality:");
+                ImGui::TextDisabled("%s", is_uk ? "�����:" : "Quality:");
                 ImGui::SameLine();
                 const char* quick_res[] = {
-                    is_uk ? "Рідна (Екран)" : "Native",
+                    is_uk ? "г��� (�����)" : "Native",
                     "1080p (Full HD)",
                     "720p (HD)",
                     "480p (SD)"
@@ -1005,7 +1022,7 @@ void imgui_window_render_ui(UiState* state) {
                 if (h_row2 > 160.0f) ImGui::Spacing();
 
                 // Destination Folder Row (Exactly sized to avoid clipping Open button)
-                ImGui::TextDisabled("%s", is_uk ? "Папка:" : "Folder:");
+                ImGui::TextDisabled("%s", is_uk ? "�����:" : "Folder:");
                 ImGui::SameLine();
 
                 float btn1_w = 90.0f;
@@ -1017,13 +1034,13 @@ void imgui_window_render_ui(UiState* state) {
                 ImGui::SetNextItemWidth(input_w);
                 ImGui::InputText("##QuickOutputDir", state->output_dir, sizeof(state->output_dir));
                 ImGui::SameLine();
-                if (ImGui::Button(is_uk ? "Огляд..." : "Browse...", ImVec2(btn1_w, 26))) {
+                if (ImGui::Button(is_uk ? "�����..." : "Browse...", ImVec2(btn1_w, 26))) {
                     if (pick_folder_dialog(state->output_dir, sizeof(state->output_dir), g_hWnd)) {
                         state->action_settings_changed = true;
                     }
                 }
                 ImGui::SameLine();
-                if (ImGui::Button(is_uk ? "Відкрити" : "Open", ImVec2(btn2_w, 26))) {
+                if (ImGui::Button(is_uk ? "³������" : "Open", ImVec2(btn2_w, 26))) {
                     state->action_open_folder_requested = true;
                 }
             }
@@ -1033,7 +1050,7 @@ void imgui_window_render_ui(UiState* state) {
             ImGui::Spacing();
 
             // ==========================================
-            // LOWER-MIDDLE ROW: [4. ПУЛЬТ КЕРУВАННЯ ТА ТЕЛЕМЕТРІЯ]
+            // LOWER-MIDDLE ROW: [4. ����� ��������� �� �������в�]
             // ==========================================
             ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.12f, 0.13f, 0.15f, 1.00f));
             ImGui::BeginChild("ActionCard", ImVec2(total_w, h_row3), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
@@ -1048,7 +1065,7 @@ void imgui_window_render_ui(UiState* state) {
                     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.88f, 0.14f, 0.24f, 1.00f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.96f, 0.22f, 0.32f, 1.00f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.74f, 0.10f, 0.18f, 1.00f));
-                    if (ImGui::Button(is_uk ? "ПОЧАТИ ЗАПИС (F9)" : "START RECORDING (F9)", ImVec2(420, btn_h))) {
+                    if (ImGui::Button(is_uk ? "������ ����� (F9)" : "START RECORDING (F9)", ImVec2(420, btn_h))) {
                         state->action_start_requested = true;
                     }
                     ImGui::PopStyleColor(3);
@@ -1057,7 +1074,7 @@ void imgui_window_render_ui(UiState* state) {
                     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.22f, 0.24f, 0.29f, 1.00f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.28f, 0.31f, 0.38f, 1.00f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.18f, 0.20f, 0.24f, 1.00f));
-                    if (ImGui::Button(is_uk ? "ЗУПИНИТИ (F9)" : "STOP (F9)", ImVec2(270, btn_h))) {
+                    if (ImGui::Button(is_uk ? "�������� (F9)" : "STOP (F9)", ImVec2(270, btn_h))) {
                         state->action_stop_requested = true;
                     }
                     ImGui::PopStyleColor(3);
@@ -1066,7 +1083,7 @@ void imgui_window_render_ui(UiState* state) {
                     bool is_paused = (state->state == 3);
                     ImGui::PushStyleColor(ImGuiCol_Button, is_paused ? ImVec4(0.16f, 0.62f, 0.35f, 1.0f) : ImVec4(0.22f, 0.26f, 0.34f, 1.0f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, is_paused ? ImVec4(0.20f, 0.70f, 0.40f, 1.0f) : ImVec4(0.28f, 0.32f, 0.42f, 1.0f));
-                    if (ImGui::Button(is_paused ? (is_uk ? "ПРОДОВЖИТИ" : "RESUME") : (is_uk ? "ПАУЗА" : "PAUSE"), ImVec2(190, btn_h))) {
+                    if (ImGui::Button(is_paused ? (is_uk ? "����������" : "RESUME") : (is_uk ? "�����" : "PAUSE"), ImVec2(190, btn_h))) {
                         state->action_pause_toggle_requested = true;
                     }
                     ImGui::PopStyleColor(2);
@@ -1079,8 +1096,8 @@ void imgui_window_render_ui(UiState* state) {
                 format_duration(state->duration_sec, time_buf, sizeof(time_buf));
                 char timer_text[128];
                 snprintf(timer_text, sizeof(timer_text), "%s   |   %s", time_buf,
-                    is_recording ? (state->state == 3 ? (is_uk ? "[ПАУЗА]" : "[PAUSED]") : (is_uk ? "[ЗАПИС ТРИВАЄ]" : "[RECORDING]"))
-                                 : (is_uk ? "[ГОТОВИЙ ДО ЗАПИСУ]" : "[READY]"));
+                    is_recording ? (state->state == 3 ? (is_uk ? "[�����]" : "[PAUSED]") : (is_uk ? "[����� ������]" : "[RECORDING]"))
+                                 : (is_uk ? "[������� �� ������]" : "[READY]"));
                 ImVec2 t_sz = ImGui::CalcTextSize(timer_text);
                 ImGui::SetCursorPosX((total_w - t_sz.x) * 0.5f);
                 ImGui::TextColored(is_recording ? ImVec4(1.0f, 0.3f, 0.3f, 1.0f) : ImVec4(0.4f, 0.85f, 1.0f, 1.0f), "%s", timer_text);
@@ -1095,10 +1112,10 @@ void imgui_window_render_ui(UiState* state) {
                 double mb = (double)state->file_bytes / (1024.0 * 1024.0);
 
                 char b1[64], b2[64], b3[64], b4[64];
-                snprintf(b1, sizeof(b1), "%s: %.1f MB", is_uk ? "Розмір" : "Size", mb);
-                snprintf(b2, sizeof(b2), "%s: %u kbps", is_uk ? "Бітрейт" : "Bitrate", state->bitrate_kbps);
+                snprintf(b1, sizeof(b1), "%s: %.1f MB", is_uk ? "�����" : "Size", mb);
+                snprintf(b2, sizeof(b2), "%s: %u kbps", is_uk ? "�������" : "Bitrate", state->bitrate_kbps);
                 snprintf(b3, sizeof(b3), "FPS: %.1f", state->current_fps);
-                snprintf(b4, sizeof(b4), "%s: %llu", is_uk ? "Пропущено" : "Dropped", (unsigned long long)state->dropped_frames);
+                snprintf(b4, sizeof(b4), "%s: %llu", is_uk ? "���������" : "Dropped", (unsigned long long)state->dropped_frames);
 
                 const char* tile_texts[] = { b1, b2, b3, b4 };
                 ImVec4 tile_colors[] = {
@@ -1131,42 +1148,42 @@ void imgui_window_render_ui(UiState* state) {
         }
 
         // TAB 2: SETTINGS (Dynamic Hardware Encoders & Audio & Hotkeys)
-        if (ImGui::BeginTabItem(is_uk ? "Налаштування" : "Settings")) {
+        if (ImGui::BeginTabItem(is_uk ? "������������" : "Settings")) {
             ImGui::Spacing();
 
             if (ImGui::BeginTabBar("SettingsSubTabs")) {
                 // SUB-TAB 1: Video & Hardware Encoders
-                if (ImGui::BeginTabItem(is_uk ? "Відео та Енкодер" : "Video & Encoder")) {
+                if (ImGui::BeginTabItem(is_uk ? "³��� �� �������" : "Video & Encoder")) {
                     ImGui::Spacing();
                     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.13f, 0.14f, 0.17f, 1.00f));
                     ImGui::BeginChild("VideoSettingsCard", ImVec2(0, 0), true);
                     {
-                        ImGui::TextColored(ImVec4(0.80f, 0.85f, 0.95f, 1.00f), is_uk ? "Параметри відео та роздільна здатність:" : "Video & Resolution Settings:");
+                        ImGui::TextColored(ImVec4(0.80f, 0.85f, 0.95f, 1.00f), is_uk ? "��������� ���� �� �������� ��������:" : "Video & Resolution Settings:");
                         ImGui::Spacing();
 
                         // Mouse Cursor Capture toggle
-                        if (ImGui::Checkbox(is_uk ? "Захоплювати курсор миші у відео" : "Capture Mouse Cursor in Video", &state->capture_cursor)) {
+                        if (ImGui::Checkbox(is_uk ? "����������� ������ ���� � ����" : "Capture Mouse Cursor in Video", &state->capture_cursor)) {
                             state->action_settings_changed = true;
                         }
                         ImGui::Spacing();
 
                         // Output Resolution Scaler
                         const char* res_labels[] = {
-                            is_uk ? "Рідна (як на екрані)" : "Native (Match screen)",
+                            is_uk ? "г��� (�� �� �����)" : "Native (Match screen)",
                             is_uk ? "1080p (1920x1080) Full HD" : "1080p (1920x1080) Full HD",
                             is_uk ? "720p (1280x720) HD" : "720p (1280x720) HD",
                             is_uk ? "480p (854x480) SD" : "480p (854x480) SD"
                         };
-                        if (ImGui::Combo(is_uk ? "Роздільна здатність запису" : "Output Resolution", &state->output_resolution, res_labels, 4)) {
+                        if (ImGui::Combo(is_uk ? "�������� �������� ������" : "Output Resolution", &state->output_resolution, res_labels, 4)) {
                             state->action_settings_changed = true;
                         }
 
                         // Color Range Selector
                         const char* color_range_labels[] = {
-                            is_uk ? "Обмежений (BT.709 TV 16-235) - Стандарт відео, точні насичені кольори" : "Limited (BT.709 TV 16-235) - Standard Broadcast & Players",
-                            is_uk ? "Повний (Full Range PC 0-255) - Повний діапазон ПК" : "Full (Full Range PC 0-255) - PC Full Dynamic Range"
+                            is_uk ? "��������� (BT.709 TV 16-235) - �������� ����, ���� ������� �������" : "Limited (BT.709 TV 16-235) - Standard Broadcast & Players",
+                            is_uk ? "������ (Full Range PC 0-255) - ������ ������� ��" : "Full (Full Range PC 0-255) - PC Full Dynamic Range"
                         };
-                        if (ImGui::Combo(is_uk ? "Колірний діапазон" : "Color Range", &state->color_range, color_range_labels, 2)) {
+                        if (ImGui::Combo(is_uk ? "������� �������" : "Color Range", &state->color_range, color_range_labels, 2)) {
                             state->action_settings_changed = true;
                         }
 
@@ -1174,7 +1191,7 @@ void imgui_window_render_ui(UiState* state) {
                         ImGui::Separator();
                         ImGui::Spacing();
 
-                        ImGui::TextColored(ImVec4(0.80f, 0.85f, 0.95f, 1.00f), is_uk ? "Апаратні можливості GPU:" : "GPU Hardware Capabilities:");
+                        ImGui::TextColored(ImVec4(0.80f, 0.85f, 0.95f, 1.00f), is_uk ? "������� ��������� GPU:" : "GPU Hardware Capabilities:");
                         ImGui::Spacing();
 
                         // 1. Dynamic filtered backends based on detected hardware
@@ -1191,7 +1208,7 @@ void imgui_window_render_ui(UiState* state) {
                         if (has_nvenc) avail_backends[avail_count++] = { 0, "NVIDIA NVENC (Hardware)" };
                         if (has_amf)   avail_backends[avail_count++] = { 1, "AMD AMF (Hardware)" };
                         if (has_qsv)   avail_backends[avail_count++] = { 2, "Intel QuickSync (Hardware)" };
-                        avail_backends[avail_count++] = { 3, is_uk ? "Програмний (CPU - libx264)" : "Software (CPU - libx264)" };
+                        avail_backends[avail_count++] = { 3, is_uk ? "���������� (CPU - libx264)" : "Software (CPU - libx264)" };
 
                         int current_backend_idx = 0;
                         for (int i = 0; i < avail_count; i++) {
@@ -1204,7 +1221,7 @@ void imgui_window_render_ui(UiState* state) {
                         const char* backend_labels[4];
                         for (int i = 0; i < avail_count; i++) backend_labels[i] = avail_backends[i].label;
 
-                        if (ImGui::Combo(is_uk ? "Бекенд енкодера" : "Encoder Backend", &current_backend_idx, backend_labels, avail_count)) {
+                        if (ImGui::Combo(is_uk ? "������ ��������" : "Encoder Backend", &current_backend_idx, backend_labels, avail_count)) {
                             state->encoder_backend = avail_backends[current_backend_idx].id;
                             state->action_settings_changed = true;
                         }
@@ -1253,18 +1270,18 @@ void imgui_window_render_ui(UiState* state) {
                         const char* codec_labels[3];
                         for (int i = 0; i < codec_count; i++) codec_labels[i] = avail_codecs[i].label;
 
-                        if (ImGui::Combo(is_uk ? "Відеокодек" : "Video Codec", &current_codec_idx, codec_labels, codec_count)) {
+                        if (ImGui::Combo(is_uk ? "³��������" : "Video Codec", &current_codec_idx, codec_labels, codec_count)) {
                             state->video_codec = avail_codecs[current_codec_idx].id;
                             state->action_settings_changed = true;
                         }
 
                         // Rate Control Mode & Parameters
                         const char* rate_modes[] = {
-                            is_uk ? "VBR (Змінний бітрейт - Рекомендовано для запису)" : "VBR (Variable Bitrate - Recommended)",
-                            is_uk ? "CBR (Постійний бітрейт - Стабільний потік)" : "CBR (Constant Bitrate - Fixed)",
-                            is_uk ? "CQP / CRF (Стала якість без обмеження бітрейту)" : "CQP / CRF (Constant Quality)"
+                            is_uk ? "VBR (������ ������ - ������������� ��� ������)" : "VBR (Variable Bitrate - Recommended)",
+                            is_uk ? "CBR (�������� ������ - ��������� ����)" : "CBR (Constant Bitrate - Fixed)",
+                            is_uk ? "CQP / CRF (����� ����� ��� ��������� �������)" : "CQP / CRF (Constant Quality)"
                         };
-                        if (ImGui::Combo(is_uk ? "Керування бітрейтом" : "Rate Control Mode", &state->rate_control, rate_modes, 3)) {
+                        if (ImGui::Combo(is_uk ? "��������� ��������" : "Rate Control Mode", &state->rate_control, rate_modes, 3)) {
                             state->action_settings_changed = true;
                         }
 
@@ -1272,15 +1289,15 @@ void imgui_window_render_ui(UiState* state) {
                             int mbps = (int)(state->target_bitrate_kbps / 1000);
                             if (mbps < 2) mbps = 15;
                             const char* bitrate_slider_title = (state->rate_control == 1)
-                                ? (is_uk ? "Постійний бітрейт (Мбіт/с)" : "Constant Bitrate (Mbps)")
-                                : (is_uk ? "Цільовий бітрейт (Мбіт/с)" : "Target Bitrate (Mbps)");
+                                ? (is_uk ? "�������� ������ (���/�)" : "Constant Bitrate (Mbps)")
+                                : (is_uk ? "ֳ������ ������ (���/�)" : "Target Bitrate (Mbps)");
                             if (ImGui::SliderInt(bitrate_slider_title, &mbps, 2, 80, "%d Mbps")) {
                                 state->target_bitrate_kbps = (uint32_t)(mbps * 1000);
                                 state->action_settings_changed = true;
                             }
 
                             // Quick preset buttons for one-click setup
-                            ImGui::TextDisabled(is_uk ? "  Швидкі пресети бітрейту:" : "  Quick Bitrate Presets:");
+                            ImGui::TextDisabled(is_uk ? "  ����� ������� �������:" : "  Quick Bitrate Presets:");
                             ImGui::SameLine();
                             if (ImGui::SmallButton("6M (720p)")) { state->target_bitrate_kbps = 6000; state->action_settings_changed = true; }
                             ImGui::SameLine();
@@ -1290,56 +1307,56 @@ void imgui_window_render_ui(UiState* state) {
                             ImGui::SameLine();
                             if (ImGui::SmallButton("30M (High)")) { state->target_bitrate_kbps = 30000; state->action_settings_changed = true; }
 
-                            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), is_uk ? "  Поточний бітрейт: %u кбіт/с (%d Мбіт/с)" : "  Active Bitrate: %u kbps (%d Mbps)", state->target_bitrate_kbps, mbps);
+                            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), is_uk ? "  �������� ������: %u ���/� (%d ���/�)" : "  Active Bitrate: %u kbps (%d Mbps)", state->target_bitrate_kbps, mbps);
                         } else { // CQP or CRF
                             if (state->quality_cqp < 10 || state->quality_cqp > 40) state->quality_cqp = 20;
-                            if (ImGui::SliderInt(is_uk ? "Коефіцієнт якості (CQP/CRF: менше = краще)" : "Quality Level (CQP/CRF: lower = better)", &state->quality_cqp, 14, 32)) {
+                            if (ImGui::SliderInt(is_uk ? "��������� ����� (CQP/CRF: ����� = �����)" : "Quality Level (CQP/CRF: lower = better)", &state->quality_cqp, 14, 32)) {
                                 state->action_settings_changed = true;
                             }
                             if (state->quality_cqp <= 17) {
-                                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), is_uk ? "  14-17: Ультра якість (великий файл, підходить для потужних ПК)" : "  14-17: Ultra Quality (Large file size)");
+                                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), is_uk ? "  14-17: ������ ����� (������� ����, �������� ��� �������� ��)" : "  14-17: Ultra Quality (Large file size)");
                             } else if (state->quality_cqp <= 23) {
-                                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), is_uk ? "  18-23: Рекомендовано (ідеальний баланс якості та навантаження)" : "  18-23: Recommended (Optimal quality and low load)");
+                                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), is_uk ? "  18-23: ������������� (��������� ������ ����� �� ������������)" : "  18-23: Recommended (Optimal quality and low load)");
                             } else {
-                                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), is_uk ? "  24-32: Компактне стиснення (мінімальне навантаження та розмір)" : "  24-32: Compact (Minimal CPU load and file size)");
+                                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), is_uk ? "  24-32: ��������� ��������� (�������� ������������ �� �����)" : "  24-32: Compact (Minimal CPU load and file size)");
                             }
                         }
 
                         // Encoder Preset (Speed vs Quality)
                         const char* preset_labels[] = {
-                            is_uk ? "Ultrafast (Надшвидкий - Рекомендовано для ігор)" : "Ultrafast (Recommended for games - 0 lag)",
-                            is_uk ? "Superfast / Fast (Швидкий)" : "Superfast / Fast (Low load)",
-                            is_uk ? "Balanced / Medium (Збалансований)" : "Balanced / Medium (Balanced)",
-                            is_uk ? "Slow (Висока якість - Велике навантаження на CPU)" : "Slow (High Quality - Heavy CPU load)"
+                            is_uk ? "Ultrafast (���������� - ������������� ��� ����)" : "Ultrafast (Recommended for games - 0 lag)",
+                            is_uk ? "Superfast / Fast (�������)" : "Superfast / Fast (Low load)",
+                            is_uk ? "Balanced / Medium (�������������)" : "Balanced / Medium (Balanced)",
+                            is_uk ? "Slow (������ ����� - ������ ������������ �� CPU)" : "Slow (High Quality - Heavy CPU load)"
                         };
-                        if (ImGui::Combo(is_uk ? "Профіль швидкодії (Пресет)" : "Encoder Preset", &state->encoder_preset, preset_labels, 4)) {
+                        if (ImGui::Combo(is_uk ? "������ ������䳿 (������)" : "Encoder Preset", &state->encoder_preset, preset_labels, 4)) {
                             state->action_settings_changed = true;
                         }
 
                         // Keyframe / GOP interval
                         int gop_options[] = { 1, 2, 3, 5 };
                         const char* gop_labels[] = {
-                            is_uk ? "1 сек (Швидке перемотування)" : "1 sec (Fast seek)",
-                            is_uk ? "2 сек (Рекомендовано)" : "2 sec (Recommended)",
-                            is_uk ? "3 сек" : "3 sec",
-                            is_uk ? "5 сек (Менший розмір файлу)" : "5 sec (Smaller size)"
+                            is_uk ? "1 ��� (������ �������������)" : "1 sec (Fast seek)",
+                            is_uk ? "2 ��� (�������������)" : "2 sec (Recommended)",
+                            is_uk ? "3 ���" : "3 sec",
+                            is_uk ? "5 ��� (������ ����� �����)" : "5 sec (Smaller size)"
                         };
                         int current_gop_idx = 1;
                         for (int i = 0; i < 4; i++) {
                             if (gop_options[i] == state->keyframe_interval_secs) current_gop_idx = i;
                         }
-                        if (ImGui::Combo(is_uk ? "Інтервал ключових кадрів (GOP)" : "Keyframe Interval (GOP)", &current_gop_idx, gop_labels, 4)) {
+                        if (ImGui::Combo(is_uk ? "�������� �������� ����� (GOP)" : "Keyframe Interval (GOP)", &current_gop_idx, gop_labels, 4)) {
                             state->keyframe_interval_secs = gop_options[current_gop_idx];
                             state->action_settings_changed = true;
                         }
 
                         // Container Format Selection
                         const char* container_formats[] = {
-                            is_uk ? "MKV (*.mkv - Рекомендовано, стійкий до збоїв)" : "MKV (*.mkv - Recommended, crash-resilient)",
-                            is_uk ? "MP4 (*.mp4 - Сумісний з усіма плеєрами/браузерами)" : "MP4 (*.mp4 - Universal compatibility)",
-                            is_uk ? "MOV (*.mov - Монтаж у DaVinci / Premiere)" : "MOV (*.mov - Video Editing / QuickTime)"
+                            is_uk ? "MKV (*.mkv - �������������, ������ �� ����)" : "MKV (*.mkv - Recommended, crash-resilient)",
+                            is_uk ? "MP4 (*.mp4 - ������� � ���� �������/����������)" : "MP4 (*.mp4 - Universal compatibility)",
+                            is_uk ? "MOV (*.mov - ������ � DaVinci / Premiere)" : "MOV (*.mov - Video Editing / QuickTime)"
                         };
-                        if (ImGui::Combo(is_uk ? "Формат відеофайлу" : "Container Format", &state->container_format, container_formats, 3)) {
+                        if (ImGui::Combo(is_uk ? "������ ���������" : "Container Format", &state->container_format, container_formats, 3)) {
                             state->action_settings_changed = true;
                         }
 
@@ -1370,7 +1387,7 @@ void imgui_window_render_ui(UiState* state) {
                         }
                         if (!has_max) {
                             fps_options[fps_count] = max_hz;
-                            snprintf(fps_labels_buf[fps_count], sizeof(fps_labels_buf[fps_count]), "%d FPS (%s)", max_hz, is_uk ? "макс. екрану" : "Display Max");
+                            snprintf(fps_labels_buf[fps_count], sizeof(fps_labels_buf[fps_count]), "%d FPS (%s)", max_hz, is_uk ? "����. ������" : "Display Max");
                             fps_labels[fps_count] = fps_labels_buf[fps_count];
                             fps_count++;
                         }
@@ -1379,26 +1396,26 @@ void imgui_window_render_ui(UiState* state) {
                         for (int i = 0; i < fps_count; i++) {
                             if (fps_options[i] == state->target_fps) current_fps_idx = i;
                         }
-                        if (ImGui::Combo(is_uk ? "Частота кадрів (FPS)" : "Frame Rate (FPS)", &current_fps_idx, fps_labels, fps_count)) {
+                        if (ImGui::Combo(is_uk ? "������� ����� (FPS)" : "Frame Rate (FPS)", &current_fps_idx, fps_labels, fps_count)) {
                             state->target_fps = fps_options[current_fps_idx];
                             state->action_settings_changed = true;
                         }
-                        ImGui::TextDisabled(is_uk ? "  Максимальна частота монітора: %d Гц" : "  Monitor Refresh Rate: %d Hz", max_hz);
+                        ImGui::TextDisabled(is_uk ? "  ����������� ������� �������: %d ��" : "  Monitor Refresh Rate: %d Hz", max_hz);
 
                         ImGui::Spacing();
                         ImGui::Separator();
                         ImGui::Spacing();
 
-                        ImGui::Text(is_uk ? "Папка для збереження записів:" : "Output Directory:");
+                        ImGui::Text(is_uk ? "����� ��� ���������� ������:" : "Output Directory:");
                         ImGui::InputText("##OutputDir", state->output_dir, sizeof(state->output_dir));
                         ImGui::SameLine();
-                        if (ImGui::Button(is_uk ? "Огляд..." : "Browse...")) {
+                        if (ImGui::Button(is_uk ? "�����..." : "Browse...")) {
                             if (pick_folder_dialog(state->output_dir, sizeof(state->output_dir), g_hWnd)) {
                                 state->action_settings_changed = true;
                             }
                         }
                         ImGui::SameLine();
-                        if (ImGui::Button(is_uk ? "Відкрити" : "Open Folder")) {
+                        if (ImGui::Button(is_uk ? "³������" : "Open Folder")) {
                             state->action_open_folder_requested = true;
                         }
                     }
@@ -1408,27 +1425,27 @@ void imgui_window_render_ui(UiState* state) {
                 }
 
                 // SUB-TAB 2: Audio Configuration
-                if (ImGui::BeginTabItem(is_uk ? "Аудіо" : "Audio")) {
+                if (ImGui::BeginTabItem(is_uk ? "����" : "Audio")) {
                     ImGui::Spacing();
                     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.13f, 0.14f, 0.17f, 1.00f));
                     ImGui::BeginChild("AudioSettingsCard", ImVec2(0, 0), true);
                     {
-                        ImGui::TextColored(ImVec4(0.80f, 0.85f, 0.95f, 1.00f), is_uk ? "Джерела аудіо та вибір пристроїв:" : "Audio Sources & Devices:");
+                        ImGui::TextColored(ImVec4(0.80f, 0.85f, 0.95f, 1.00f), is_uk ? "������� ���� �� ���� ��������:" : "Audio Sources & Devices:");
                         ImGui::Spacing();
 
                         // System Audio & Output Device
-                        if (ImGui::Checkbox(is_uk ? "Записувати системний звук (WASAPI Loopback)" : "Record System Audio (WASAPI Loopback)", &state->record_system_audio)) {
+                        if (ImGui::Checkbox(is_uk ? "���������� ��������� ���� (WASAPI Loopback)" : "Record System Audio (WASAPI Loopback)", &state->record_system_audio)) {
                             state->action_settings_changed = true;
                         }
                         if (state->record_system_audio) {
                             if (state->audio_output_count > 0 && state->audio_output_names != NULL) {
-                                if (ImGui::Combo(is_uk ? "Пристрій виводу (навушники / динаміки)" : "Playback Device (Headphones / Speakers)",
+                                if (ImGui::Combo(is_uk ? "������� ������ (��������� / �������)" : "Playback Device (Headphones / Speakers)",
                                     &state->selected_audio_output, state->audio_output_names, state->audio_output_count)) {
                                     state->action_settings_changed = true;
                                 }
                             }
                             int sys_vol_percent = (int)(state->system_volume * 100.0f + 0.5f);
-                            if (ImGui::SliderInt(is_uk ? "Гучність системи (%)" : "System Volume (%)", &sys_vol_percent, 0, 200, "%d%%")) {
+                            if (ImGui::SliderInt(is_uk ? "������� ������� (%)" : "System Volume (%)", &sys_vol_percent, 0, 200, "%d%%")) {
                                 state->system_volume = (float)sys_vol_percent / 100.0f;
                                 state->action_settings_changed = true;
                             }
@@ -1444,18 +1461,18 @@ void imgui_window_render_ui(UiState* state) {
                         ImGui::Spacing();
 
                         // Microphone & Input Device
-                        if (ImGui::Checkbox(is_uk ? "Записувати мікрофон (Microphone Input)" : "Record Microphone (Microphone Input)", &state->record_microphone)) {
+                        if (ImGui::Checkbox(is_uk ? "���������� ������� (Microphone Input)" : "Record Microphone (Microphone Input)", &state->record_microphone)) {
                             state->action_settings_changed = true;
                         }
                         if (state->record_microphone) {
                             if (state->audio_input_count > 0 && state->audio_input_names != NULL) {
-                                if (ImGui::Combo(is_uk ? "Пристрій вводу (мікрофон)" : "Recording Device (Microphone)",
+                                if (ImGui::Combo(is_uk ? "������� ����� (�������)" : "Recording Device (Microphone)",
                                     &state->selected_audio_input, state->audio_input_names, state->audio_input_count)) {
                                     state->action_settings_changed = true;
                                 }
                             }
                             int mic_vol_percent = (int)(state->mic_volume * 100.0f + 0.5f);
-                            if (ImGui::SliderInt(is_uk ? "Гучність мікрофона (%)" : "Microphone Volume (%)", &mic_vol_percent, 0, 200, "%d%%")) {
+                            if (ImGui::SliderInt(is_uk ? "������� �������� (%)" : "Microphone Volume (%)", &mic_vol_percent, 0, 200, "%d%%")) {
                                 state->mic_volume = (float)mic_vol_percent / 100.0f;
                                 state->action_settings_changed = true;
                             }
@@ -1471,19 +1488,19 @@ void imgui_window_render_ui(UiState* state) {
                         ImGui::Spacing();
 
                         // Separate Tracks
-                        if (ImGui::Checkbox(is_uk ? "Записувати на окремі доріжки (Multi-Track Audio)" : "Record Separate Audio Tracks (Multi-Track Audio)", &state->separate_audio_tracks)) {
+                        if (ImGui::Checkbox(is_uk ? "���������� �� ����� ������ (Multi-Track Audio)" : "Record Separate Audio Tracks (Multi-Track Audio)", &state->separate_audio_tracks)) {
                             state->action_settings_changed = true;
                         }
-                        ImGui::TextDisabled(is_uk ? "  Доріжка 1: Системний звук | Доріжка 2: Мікрофон (зручно для монтажу)"
+                        ImGui::TextDisabled(is_uk ? "  ������ 1: ��������� ���� | ������ 2: ̳������ (������ ��� �������)"
                                                   : "  Track 1: System Audio | Track 2: Microphone (Ideal for editing)");
 
                         ImGui::Spacing();
 
                         // Standalone Audio File (.wav)
-                        if (ImGui::Checkbox(is_uk ? "Зберігати звук як окремий файл (.wav)" : "Save Audio as Separate File (.wav)", &state->save_separate_audio_file)) {
+                        if (ImGui::Checkbox(is_uk ? "�������� ���� �� ������� ���� (.wav)" : "Save Audio as Separate File (.wav)", &state->save_separate_audio_file)) {
                             state->action_settings_changed = true;
                         }
-                        ImGui::TextDisabled(is_uk ? "  Створює безкомпресійний студійний 48 кГц WAV файл поруч із відеофайлом."
+                        ImGui::TextDisabled(is_uk ? "  ������� �������������� �������� 48 ��� WAV ���� ����� �� ����������."
                                                   : "  Writes uncompressed studio 48 kHz WAV audio alongside the video file.");
                     }
                     ImGui::EndChild();
@@ -1492,19 +1509,19 @@ void imgui_window_render_ui(UiState* state) {
                 }
 
                 // SUB-TAB 3: Hotkeys & Overlay Indicator
-                if (ImGui::BeginTabItem(is_uk ? "Гарячі клавіші та Оверлей" : "Hotkeys & Overlay")) {
+                if (ImGui::BeginTabItem(is_uk ? "������ ������ �� �������" : "Hotkeys & Overlay")) {
                     ImGui::Spacing();
                     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.13f, 0.14f, 0.17f, 1.00f));
                     ImGui::BeginChild("HotkeysSettingsCard", ImVec2(0, 0), true);
                     {
-                        ImGui::TextColored(ImVec4(0.80f, 0.85f, 0.95f, 1.00f), is_uk ? "Глобальні комбінації клавіш:" : "Global Hotkeys:");
+                        ImGui::TextColored(ImVec4(0.80f, 0.85f, 0.95f, 1.00f), is_uk ? "�������� ��������� �����:" : "Global Hotkeys:");
                         ImGui::Spacing();
 
                         const char* hotkey_presets[] = {
-                            "F9 (Рекомендовано для ігор)",
+                            "F9 (������������� ��� ����)",
                             "F10",
                             "Ctrl + Shift + R",
-                            "Alt + F9 (NVIDIA ShadowPlay стиль)"
+                            "Alt + F9 (NVIDIA ShadowPlay �����)"
                         };
                         const char* hotkey_presets_en[] = {
                             "F9 (Recommended for gaming)",
@@ -1513,27 +1530,27 @@ void imgui_window_render_ui(UiState* state) {
                             "Alt + F9 (NVIDIA ShadowPlay style)"
                         };
 
-                        if (ImGui::Combo(is_uk ? "Старт / Зупинка запису" : "Start / Stop Recording",
+                        if (ImGui::Combo(is_uk ? "����� / ������� ������" : "Start / Stop Recording",
                             &state->hotkey_start_stop_preset,
                             is_uk ? hotkey_presets : hotkey_presets_en, 4)) {
                             state->action_settings_changed = true;
                         }
 
-                        ImGui::TextDisabled(is_uk ? "Пауза / Відновлення запису: Ctrl + Shift + P"
+                        ImGui::TextDisabled(is_uk ? "����� / ³��������� ������: Ctrl + Shift + P"
                                                   : "Pause / Resume Recording: Ctrl + Shift + P");
 
                         ImGui::Spacing();
                         ImGui::Separator();
                         ImGui::Spacing();
 
-                        ImGui::TextColored(ImVec4(0.80f, 0.85f, 0.95f, 1.00f), is_uk ? "Екранний оверлей-індикатор:" : "On-Screen Recording Overlay:");
+                        ImGui::TextColored(ImVec4(0.80f, 0.85f, 0.95f, 1.00f), is_uk ? "�������� �������-���������:" : "On-Screen Recording Overlay:");
                         ImGui::Spacing();
 
-                        if (ImGui::Checkbox(is_uk ? "Відображати індикатор запису поверх усіх вікон" : "Show On-Screen Recording Indicator Overlay", &state->show_overlay_indicator)) {
+                        if (ImGui::Checkbox(is_uk ? "³��������� ��������� ������ ������ ��� ����" : "Show On-Screen Recording Indicator Overlay", &state->show_overlay_indicator)) {
                             state->action_settings_changed = true;
                         }
-                        ImGui::TextDisabled(is_uk ? "Показує прозорий плаваючий бейдж [🔴 REC 00:01:23 | 60 FPS] у кутку екрана без блокування кліків миші."
-                                                  : "Displays a transparent floating badge [🔴 REC 00:01:23 | 60 FPS] in the screen corner with full click-through.");
+                        ImGui::TextDisabled(is_uk ? "������ �������� ��������� ����� [?? REC 00:01:23 | 60 FPS] � ����� ������ ��� ���������� ���� ����."
+                                                  : "Displays a transparent floating badge [?? REC 00:01:23 | 60 FPS] in the screen corner with full click-through.");
                     }
                     ImGui::EndChild();
                     ImGui::PopStyleColor();
@@ -1541,15 +1558,15 @@ void imgui_window_render_ui(UiState* state) {
                 }
 
                 // SUB-TAB 4: Language
-                if (ImGui::BeginTabItem(is_uk ? "Мова" : "Language")) {
+                if (ImGui::BeginTabItem(is_uk ? "����" : "Language")) {
                     ImGui::Spacing();
                     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.13f, 0.14f, 0.17f, 1.00f));
                     ImGui::BeginChild("LangSettingsCard", ImVec2(0, 380), true);
                     {
-                        ImGui::TextColored(ImVec4(0.80f, 0.85f, 0.95f, 1.00f), is_uk ? "Мова інтерфейсу:" : "Interface Language:");
+                        ImGui::TextColored(ImVec4(0.80f, 0.85f, 0.95f, 1.00f), is_uk ? "���� ����������:" : "Interface Language:");
                         ImGui::Spacing();
 
-                        const char* languages[] = { "English", "Українська" };
+                        const char* languages[] = { "English", "���������" };
                         if (ImGui::Combo("##LanguageCombo", &state->language, languages, 2)) {
                             state->action_language_changed = true;
                         }
@@ -1594,6 +1611,7 @@ void imgui_window_present(void) {
     g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
     HRESULT hr = g_pSwapChain->Present(1, 0); // V-Sync enabled
+    { static int s_frames = 0; if (s_frames == 0 || s_frames == 60) { char b[64]; snprintf(b, sizeof(b), "present #%d hr=0x%08X", s_frames, (unsigned)hr); ls_dbg(b); } s_frames++; }
 
     if (hr == DXGI_STATUS_OCCLUDED) {
         // Window is occluded (covered by game or other app): Present does not wait for V-Sync.
