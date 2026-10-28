@@ -1,0 +1,32 @@
+info(main): ==================================================
+info(main):   LifeScreen v0.1.0-alpha (windows-x86_64)  
+info(main): ==================================================
+[D3D11VA @ 000001eb2231ebc0] Using device 8086:8a56 (Intel(R) UHD Graphics).
+[D3D11VA @ 000001eb2231ff80] Using device 8086:8a56 (Intel(R) UHD Graphics).
+[D3D11VA @ 000001eb2231ef40] Using device 8086:8a56 (Intel(R) UHD Graphics).
+info(main): Probing Hardware Encoders:
+info(main):   * NVIDIA NVENC: H264=false, HEVC=false, AV1=false
+info(main):   * AMD AMF:      H264=false, HEVC=false, AV1=false
+info(main):   * Intel QSV:    H264=true, HEVC=true, AV1=false
+info(main):   * Software:     x264=true, x265=true
+info(main): Active encoder configuration: backend=qsv, codec=h264, rate_control=vbr, CQP=20, FPS=60
+info(main): Locale: English - Recording
+info(main): Enumerating Display Monitors...
+info(main):   [0] \\.\DISPLAY1 (1920x1080) on Intel(R) UHD Graphics (primary=true)
+info(main): Testing DXGI Desktop Duplication on primary monitor...
+info(dxgi): Checking Adapter [0]: 'Intel(R) UHD Graphics', Output [0]
+info(dxgi):   -> Found Monitor [0]: 1920x1080
+info(dxgi):   -> DuplicateOutput1 (DXGI 1.5 HDR / WCG) activated on adapter 'Intel(R) UHD Graphics'!
+info(dxgi):   -> DuplicateOutput SUCCEEDED on adapter 'Intel(R) UHD Graphics'!
+info(main): DXGI Desktop Duplication initialized: resolution=1920x1080
+info(main): Enumerating Active Windows for WGC capture...
+info(main):   * [HWND 0x48085a] '‎General' (Telegram.exe, 1936x1048)
+info(main):   * [HWND 0x48087e] 'Calendar | Meeting join | лекція з вищої математики у групах КН-26-1,2,3,47 | Microsoft Teams — Zen Browser' (zen.exe, 1936x1048)
+info(main):   * [HWND 0x16041c] 'Zig Screen Recorder Archi...' (Antigravity.exe, 1416x908)
+info(main):   * [HWND 0x9060e] 'D:\Video\Replay й інші вкладки (4) – Файловий провідник' (explorer.exe, 1918x1030)
+info(main): Testing WASAPI Loopback system audio capture...
+info(main): WASAPI Loopback initialized: 48000 Hz, 2 channels, float=true
+info(main): Launching LifeScreen Native UI (Dear ImGui + DirectX 11)...
+[D3D11VA @ 000001eb281d7c00] Using device 8086:8a56 (Intel(R) UHD Graphics).
+[D3D11VA @ 000001eb281d6b40] Using device 8086:8a56 (Intel(R) UHD Graphics).
+[D3D11VA @ 000001eb281d6d80] Using device 8086:8a56 (Intel(R) UHD Graphics).

@@ -1,7 +1,16 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+    // Build for a baseline x86-64 CPU by default (no AVX-512/AVX2 etc.) so the binary runs on any PC,
+    // including old Pentium/Celeron CPUs. Native-CPU builds crash with 0xC000001D (illegal instruction)
+    // on machines that lack the build machine's instruction set extensions.
+    const host_is_win_x64 = @import("builtin").os.tag == .windows and @import("builtin").cpu.arch == .x86_64;
+    const target = b.standardTargetOptions(.{
+        .default_target = if (host_is_win_x64)
+            .{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .gnu, .cpu_model = .baseline }
+        else
+            .{},
+    });
     const optimize = b.standardOptimizeOption(.{});
 
     const is_windows = target.result.os.tag == .windows;
