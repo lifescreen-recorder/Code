@@ -1,6 +1,6 @@
 .{
     .name = .lifescreen,
-    .version = "0.3.0-alpha",
+    .version = "0.1.0",
     .fingerprint = 0x7915b19add83b7e6,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
@@ -13,6 +13,7 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        "VERSION",
         "src",
         "tests",
         "README.md",

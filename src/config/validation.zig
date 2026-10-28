@@ -5,12 +5,18 @@ const config = @import("config.zig");
 
 pub fn validateAndSanitize(cfg: *config.Config) void {
     // 1. Language validation
-    if (!std.mem.eql(u8, cfg.language, "en") and !std.mem.eql(u8, cfg.language, "uk")) {
+    const valid_lang = std.mem.eql(u8, cfg.language, "en") or
+        std.mem.eql(u8, cfg.language, "uk") or
+        std.mem.eql(u8, cfg.language, "zh") or
+        std.mem.eql(u8, cfg.language, "de") or
+        std.mem.eql(u8, cfg.language, "fr") or
+        std.mem.eql(u8, cfg.language, "pl");
+    if (!valid_lang) {
         cfg.language = "en";
     }
 
     // 2. Video validation
-    cfg.video.fps = std.math.clamp(cfg.video.fps, 15, 240);
+    cfg.video.fps = std.math.clamp(cfg.video.fps, 10, 240);
     if (cfg.video.resolution_width > 0) {
         // Encoders require even dimensions
         cfg.video.resolution_width = (cfg.video.resolution_width + 1) & ~@as(u32, 1);
@@ -62,6 +68,12 @@ test "validation clamps out-of-range values safely" {
     try std.testing.expectEqual(@as(f32, 0.0), cfg.audio.mic_volume);
     try std.testing.expectEqualStrings("{date}_{time}_{app}", cfg.output.filename_pattern);
     try std.testing.expectEqualStrings("en", cfg.language);
+
+    cfg.video.fps = 5;
+    cfg.language = "de";
+    validateAndSanitize(&cfg);
+    try std.testing.expectEqual(@as(u32, 10), cfg.video.fps);
+    try std.testing.expectEqualStrings("de", cfg.language);
 }
 
 test "validation ensures even dimensions for encoder" {

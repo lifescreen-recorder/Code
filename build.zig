@@ -68,7 +68,13 @@ pub fn build(b: *std.Build) void {
             .flags = &[_][]const u8{ "-std=c11", "-O2" },
         });
 
+        const app_version = std.mem.trim(u8, @embedFile("VERSION"), " \r\n\t");
         const imgui_flags = &[_][]const u8{ "-std=c++17", "-O2" };
+        const bridge_flags = &[_][]const u8{
+            "-std=c++17",
+            "-O2",
+            b.fmt("-DLIFESCREEN_VERSION=\"{s}\"", .{app_version}),
+        };
         exe.root_module.addCSourceFile(.{ .file = b.path("vendor/cimgui/imgui/imgui.cpp"), .flags = imgui_flags });
         exe.root_module.addCSourceFile(.{ .file = b.path("vendor/cimgui/imgui/imgui_demo.cpp"), .flags = imgui_flags });
         exe.root_module.addCSourceFile(.{ .file = b.path("vendor/cimgui/imgui/imgui_draw.cpp"), .flags = imgui_flags });
@@ -77,7 +83,7 @@ pub fn build(b: *std.Build) void {
         exe.root_module.addCSourceFile(.{ .file = b.path("vendor/cimgui/imgui/backends/imgui_impl_win32.cpp"), .flags = imgui_flags });
         exe.root_module.addCSourceFile(.{ .file = b.path("vendor/cimgui/imgui/backends/imgui_impl_dx11.cpp"), .flags = imgui_flags });
         exe.root_module.addCSourceFile(.{ .file = b.path("vendor/cimgui/cimgui.cpp"), .flags = imgui_flags });
-        exe.root_module.addCSourceFile(.{ .file = b.path("src/ui/imgui_bridge.cpp"), .flags = imgui_flags });
+        exe.root_module.addCSourceFile(.{ .file = b.path("src/ui/imgui_bridge.cpp"), .flags = bridge_flags });
 
         exe.root_module.addIncludePath(b.path("vendor/ffmpeg/include"));
         exe.root_module.addIncludePath(b.path("src/platform/windows"));

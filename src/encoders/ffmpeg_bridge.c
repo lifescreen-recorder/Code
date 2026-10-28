@@ -114,25 +114,11 @@ static int test_hardware_encoder(const char* name) {
     return (ret >= 0);
 }
 
-static void ls_dbg(const char *msg) {
-    char path[MAX_PATH];
-    DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", path, MAX_PATH - 32);
-    if (n == 0 || n > MAX_PATH - 32) return;
-    strcat(path, "\\LifeScreen");
-    CreateDirectoryA(path, NULL);
-    strcat(path, "\\startup.log");
-    FILE *f = fopen(path, "a");
-    if (!f) return;
-    SYSTEMTIME st; GetLocalTime(&st);
-    fprintf(f, "[%02d:%02d:%02d.%03d] [ffmpeg] %s\n", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, msg);
-    fclose(f);
-}
-
 uint32_t ffmpeg_bridge_probe_encoders(void) {
     static int s_probed = 0;
     static uint32_t s_cached_caps = 0;
     if (s_probed) return s_cached_caps;
-    ls_dbg("probing encoders...");
+
     uint32_t caps = 0;
     if (test_hardware_encoder("h264_nvenc")) caps |= ENCODER_CAP_NVENC_H264;
     if (test_hardware_encoder("hevc_nvenc")) caps |= ENCODER_CAP_NVENC_HEVC;
@@ -150,7 +136,7 @@ uint32_t ffmpeg_bridge_probe_encoders(void) {
     if (avcodec_find_encoder_by_name("libx265"))    caps |= ENCODER_CAP_SW_X265;
     s_cached_caps = caps;
     s_probed = 1;
-    ls_dbg("probe done");
+
     return caps;
 }
 

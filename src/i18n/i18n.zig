@@ -4,11 +4,19 @@ const std = @import("std");
 pub const Language = enum {
     en,
     uk,
+    zh,
+    de,
+    fr,
+    pl,
 
     pub fn code(self: Language) []const u8 {
         return switch (self) {
             .en => "en",
             .uk => "uk",
+            .zh => "zh",
+            .de => "de",
+            .fr => "fr",
+            .pl => "pl",
         };
     }
 
@@ -16,11 +24,19 @@ pub const Language = enum {
         return switch (self) {
             .en => "English",
             .uk => "Українська",
+            .zh => "中文 (简体)",
+            .de => "Deutsch",
+            .fr => "Français",
+            .pl => "Polski",
         };
     }
 
     pub fn fromCode(c: []const u8) Language {
         if (std.mem.startsWith(u8, c, "uk")) return .uk;
+        if (std.mem.startsWith(u8, c, "zh")) return .zh;
+        if (std.mem.startsWith(u8, c, "de")) return .de;
+        if (std.mem.startsWith(u8, c, "fr")) return .fr;
+        if (std.mem.startsWith(u8, c, "pl")) return .pl;
         return .en;
     }
 };
@@ -38,6 +54,10 @@ pub const Entry = struct {
 
 const en_raw = @embedFile("translations/en.txt");
 const uk_raw = @embedFile("translations/uk.txt");
+const zh_raw = @embedFile("translations/zh.txt");
+const de_raw = @embedFile("translations/de.txt");
+const fr_raw = @embedFile("translations/fr.txt");
+const pl_raw = @embedFile("translations/pl.txt");
 
 /// Comptime parser for key=value translation files
 pub fn parseTranslations(comptime raw: []const u8) []const Entry {
@@ -73,24 +93,27 @@ pub fn parseTranslations(comptime raw: []const u8) []const Entry {
 
 pub const en_entries = parseTranslations(en_raw);
 pub const uk_entries = parseTranslations(uk_raw);
+pub const zh_entries = parseTranslations(zh_raw);
+pub const de_entries = parseTranslations(de_raw);
+pub const fr_entries = parseTranslations(fr_raw);
+pub const pl_entries = parseTranslations(pl_raw);
 
-// Comptime verification that both language tables have identical keys
-comptime {
-    @setEvalBranchQuota(100_000);
+fn verifyTableAgainstEn(comptime table: []const Entry, comptime name: []const u8) void {
+    @setEvalBranchQuota(200_000);
     for (en_entries) |e| {
         var found = false;
-        for (uk_entries) |u| {
+        for (table) |u| {
             if (std.mem.eql(u8, e.key, u.key)) {
                 found = true;
                 break;
             }
         }
         if (!found) {
-            @compileError("i18n missing key in uk.txt: " ++ e.key);
+            @compileError("i18n missing key in " ++ name ++ ": " ++ e.key);
         }
     }
 
-    for (uk_entries) |u| {
+    for (table) |u| {
         var found = false;
         for (en_entries) |e| {
             if (std.mem.eql(u8, u.key, e.key)) {
@@ -99,9 +122,18 @@ comptime {
             }
         }
         if (!found) {
-            @compileError("i18n missing key in en.txt: " ++ u.key);
+            @compileError("i18n missing key in en.txt (found in " ++ name ++ "): " ++ u.key);
         }
     }
+}
+
+// Comptime verification that all language tables have identical keys
+comptime {
+    verifyTableAgainstEn(uk_entries, "uk.txt");
+    verifyTableAgainstEn(zh_entries, "zh.txt");
+    verifyTableAgainstEn(de_entries, "de.txt");
+    verifyTableAgainstEn(fr_entries, "fr.txt");
+    verifyTableAgainstEn(pl_entries, "pl.txt");
 }
 
 pub const I18n = struct {
@@ -117,6 +149,10 @@ pub const I18n = struct {
         const table = switch (self.current_lang) {
             .en => en_entries,
             .uk => uk_entries,
+            .zh => zh_entries,
+            .de => de_entries,
+            .fr => fr_entries,
+            .pl => pl_entries,
         };
 
         for (table) |item| {
@@ -140,11 +176,24 @@ pub const I18n = struct {
     /// Selects the plural category according to language rules
     pub fn getPluralCategory(lang: Language, n: u64) PluralCategory {
         return switch (lang) {
-            .en => if (n == 1) .one else .many,
+            .en, .de => if (n == 1) .one else .many,
+            .fr => if (n <= 1) .one else .many,
+            .zh => .many,
             .uk => {
                 const mod10 = n % 10;
                 const mod100 = n % 100;
                 if (mod10 == 1 and mod100 != 11) {
+                    return .one;
+                } else if (mod10 >= 2 and mod10 <= 4 and (mod100 < 10 or mod100 >= 20)) {
+                    return .few;
+                } else {
+                    return .many;
+                }
+            },
+            .pl => {
+                const mod10 = n % 10;
+                const mod100 = n % 100;
+                if (n == 1) {
                     return .one;
                 } else if (mod10 >= 2 and mod10 <= 4 and (mod100 < 10 or mod100 >= 20)) {
                     return .few;
@@ -236,6 +285,10 @@ pub fn format(allocator: std.mem.Allocator, template: []const u8, params: anytyp
 test "comptime key equality check passed" {
     try std.testing.expect(en_entries.len > 0);
     try std.testing.expectEqual(en_entries.len, uk_entries.len);
+    try std.testing.expectEqual(en_entries.len, zh_entries.len);
+    try std.testing.expectEqual(en_entries.len, de_entries.len);
+    try std.testing.expectEqual(en_entries.len, fr_entries.len);
+    try std.testing.expectEqual(en_entries.len, pl_entries.len);
 }
 
 test "i18n basic translation and runtime switching" {
@@ -244,6 +297,18 @@ test "i18n basic translation and runtime switching" {
 
     i18n.setLanguage(.uk);
     try std.testing.expectEqualStrings("Запис", i18n.get("btn_record"));
+
+    i18n.setLanguage(.zh);
+    try std.testing.expectEqualStrings("开始录制", i18n.get("btn_record"));
+
+    i18n.setLanguage(.de);
+    try std.testing.expectEqualStrings("Aufnahme", i18n.get("btn_record"));
+
+    i18n.setLanguage(.fr);
+    try std.testing.expectEqualStrings("Enregistrer", i18n.get("btn_record"));
+
+    i18n.setLanguage(.pl);
+    try std.testing.expectEqualStrings("Nagrywaj", i18n.get("btn_record"));
 }
 
 test "i18n Ukrainian plural rules" {

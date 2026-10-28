@@ -162,7 +162,18 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
     ui_state.selected_audio_input = @intCast(cfg.audio.selected_audio_input);
 
     ui_state.capture_cursor = cfg.video.capture_cursor;
-    ui_state.language = if (std.mem.eql(u8, cfg.language, "uk")) 1 else 0;
+    ui_state.language = if (std.mem.eql(u8, cfg.language, "uk"))
+        1
+    else if (std.mem.eql(u8, cfg.language, "zh"))
+        2
+    else if (std.mem.eql(u8, cfg.language, "de"))
+        3
+    else if (std.mem.eql(u8, cfg.language, "fr"))
+        4
+    else if (std.mem.eql(u8, cfg.language, "pl"))
+        5
+    else
+        0;
     ui_state.quality_cqp = @intCast(cfg.encoder.quality_cqp);
     ui_state.target_fps = @intCast(cfg.video.fps);
     ui_state.container_format = switch (cfg.encoder.container) {
@@ -563,7 +574,15 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
 
         if (ui_state.action_language_changed) {
             ui_state.action_language_changed = false;
-            const lang: i18n.Language = if (ui_state.language == 1) .uk else .en;
+            const lang: i18n.Language = switch (ui_state.language) {
+                1 => .uk,
+                2 => .zh,
+                3 => .de,
+                4 => .fr,
+                5 => .pl,
+                else => .en,
+            };
+            recorder_pipeline.cfg.language = lang.code();
             i18n.I18n.global.setLanguage(lang);
         }
 
