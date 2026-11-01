@@ -145,16 +145,31 @@ pub const GameCapture = struct {
             return null; // Timeout / skipped frame
         }
 
+        const ipc = self.ipc_ptr.?;
+        if (!ipc.active or ipc.shared_handle == 0) return null;
+
         // Check if game resized swapchain or recreated shared texture
-        if (self.ipc_ptr.?.shared_handle != self.current_shared_handle) {
+        if (ipc.shared_handle != self.current_shared_handle) {
             log.info("Game texture resized to {d}x{d}, reopening shared handle...", .{
-                self.ipc_ptr.?.width,
-                self.ipc_ptr.?.height,
+                ipc.width,
+                ipc.height,
             });
             try self.reopenSharedTexture();
         }
 
-        const tex = self.shared_texture orelse return null;
+        var tex = self.shared_texture orelse return null;
+        if (ipc.width > 0 and ipc.height > 0 and (ipc.width != self.width or ipc.height != self.height)) {
+            const tex_desc = tex.getDesc();
+            if (tex_desc.Width != ipc.width or tex_desc.Height != ipc.height) {
+                log.info("Game frame size changed to {d}x{d} with same shared handle, reopening texture...", .{ ipc.width, ipc.height });
+                try self.reopenSharedTexture();
+                tex = self.shared_texture orelse return null;
+            } else {
+                self.width = ipc.width;
+                self.height = ipc.height;
+            }
+        }
+
         self.frame_index += 1;
 
         return types.VideoFrame{
