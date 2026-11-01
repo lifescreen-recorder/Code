@@ -26,6 +26,23 @@ pub const WgcCapture = struct {
     height: u32,
     frame_count: u64 = 0,
 
+    fn recreateDestTexture(self: *WgcCapture, new_w: u32, new_h: u32) !void {
+        const tex_desc = d3d11.D3D11_TEXTURE2D_DESC{
+            .Width = new_w,
+            .Height = new_h,
+            .Format = d3d11.DXGI_FORMAT_B8G8R8A8_UNORM,
+            .Usage = d3d11.D3D11_USAGE_DEFAULT,
+            .BindFlags = d3d11.D3D11_BIND_RENDER_TARGET | d3d11.D3D11_BIND_SHADER_RESOURCE,
+            .MiscFlags = 0x2, // D3D11_RESOURCE_MISC_SHARED
+        };
+
+        const new_tex = try self.d3d.device.createTexture2D(&tex_desc);
+        _ = self.dest_texture.release();
+        self.dest_texture = new_tex;
+        self.width = new_w;
+        self.height = new_h;
+    }
+
     pub fn isSupported() bool {
         return wgc_is_supported();
     }
@@ -117,6 +134,9 @@ pub const WgcCapture = struct {
         var h: u32 = self.height;
 
         const ok = wgc_capture_acquire_frame(self.handle, @ptrCast(self.dest_texture), timeout_ms, &w, &h);
+        if ((w != self.width or h != self.height) and w > 0 and h > 0) {
+            try self.recreateDestTexture(w, h);
+        }
         if (!ok) return null;
 
         self.width = w;

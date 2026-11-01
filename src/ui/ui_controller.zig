@@ -364,6 +364,8 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
                     const now_ns = clock.MonotonicClock.nowNanos();
                     if (pb.acquireFrame(2, now_ns)) |maybe_frame| {
                         if (maybe_frame) |frame| {
+                            ui_state.preview_width = @intCast(frame.width);
+                            ui_state.preview_height = @intCast(frame.height);
                             app_window.imgui_update_preview_d3d11(frame.gpu_texture_ptr, @intCast(frame.width), @intCast(frame.height));
                         }
                     } else |_| {}

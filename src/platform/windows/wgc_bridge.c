@@ -458,8 +458,32 @@ bool wgc_capture_acquire_frame(WgcCapture* cap, void* dest_texture, uint32_t tim
     SizeInt32 contentSize = { 0, 0 };
     frame->lpVtbl->get_ContentSize(frame, &contentSize);
     if (contentSize.Width > 0 && contentSize.Height > 0) {
-        cap->width = (uint32_t)contentSize.Width;
-        cap->height = (uint32_t)contentSize.Height;
+        const uint32_t new_width = (uint32_t)contentSize.Width;
+        const uint32_t new_height = (uint32_t)contentSize.Height;
+        if (new_width != cap->width || new_height != cap->height) {
+            SizeInt32 new_size = { (int32_t)new_width, (int32_t)new_height };
+            HRESULT recreate_hr = cap->frame_pool->lpVtbl->Recreate(
+                cap->frame_pool,
+                cap->winrt_device,
+                87, // DirectXPixelFormat_B8G8R8A8UIntNormalized
+                2,
+                new_size
+            );
+            if (FAILED(recreate_hr)) {
+                fprintf(stderr, "[WGC] FramePool Recreate failed: 0x%08X (new size: %ux%u)\n", (unsigned int)recreate_hr, new_width, new_height);
+            }
+
+            cap->width = new_width;
+            cap->height = new_height;
+            if (out_width) *out_width = cap->width;
+            if (out_height) *out_height = cap->height;
+
+            frame->lpVtbl->base.Release((IInspectable_Local*)frame);
+            return false;
+        }
+
+        cap->width = new_width;
+        cap->height = new_height;
     }
     if (out_width) *out_width = cap->width;
     if (out_height) *out_height = cap->height;

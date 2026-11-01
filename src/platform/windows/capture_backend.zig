@@ -145,11 +145,16 @@ pub const CaptureBackend = struct {
     }
 
     pub fn acquireFrame(self: *CaptureBackend, timeout_ms: u32, pts_nanos: u64) !?types.VideoFrame {
-        switch (self.backend_type) {
-            .dxgi => return self.dxgi_cap.?.acquireFrame(timeout_ms, pts_nanos),
-            .wgc => return self.wgc_cap.?.acquireFrame(timeout_ms, pts_nanos),
-            .game => return self.game_cap.?.acquireFrame(timeout_ms, pts_nanos),
+        const frame = switch (self.backend_type) {
+            .dxgi => try self.dxgi_cap.?.acquireFrame(timeout_ms, pts_nanos),
+            .wgc => try self.wgc_cap.?.acquireFrame(timeout_ms, pts_nanos),
+            .game => try self.game_cap.?.acquireFrame(timeout_ms, pts_nanos),
+        };
+        if (frame) |f| {
+            self.width = f.width;
+            self.height = f.height;
         }
+        return frame;
     }
 
     pub fn getD3DDevice(self: *CaptureBackend) *d3d11.ID3D11Device {

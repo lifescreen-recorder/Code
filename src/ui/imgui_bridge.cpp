@@ -80,6 +80,8 @@ static int                      g_currentHotkeyPreset = -1;
 // Live Screen Preview Engine State
 static ID3D11Texture2D*          g_pPreviewTexture = NULL;
 static ID3D11ShaderResourceView* g_pPreviewSRV = NULL;
+static ID3D11Texture2D*          g_pPreviewSharedOpenedTexture = NULL;
+static HANDLE                    g_previewSharedHandle = NULL;
 static int                       g_previewWidth = 0;
 static int                       g_previewHeight = 0;
 static bool                      g_previewEnabled = false;
@@ -88,6 +90,14 @@ static bool                      g_previewPaused = false;
 static uint64_t                  g_previewFrameCount = 0;
 static CRITICAL_SECTION          g_previewCs;
 static bool                      g_previewCsInit = false;
+
+static void reset_preview_shared_cache(void) {
+    if (g_pPreviewSharedOpenedTexture) {
+        g_pPreviewSharedOpenedTexture->Release();
+        g_pPreviewSharedOpenedTexture = NULL;
+    }
+    g_previewSharedHandle = NULL;
+}
 
 extern "C" {
 void imgui_set_preview_enabled(bool enabled) {
@@ -125,6 +135,7 @@ void imgui_update_preview_d3d11(void* d3d11_texture, int width, int height) {
     if (!g_pPreviewTexture || g_previewWidth != req_w || g_previewHeight != req_h) {
         if (g_pPreviewSRV) { g_pPreviewSRV->Release(); g_pPreviewSRV = NULL; }
         if (g_pPreviewTexture) { g_pPreviewTexture->Release(); g_pPreviewTexture = NULL; }
+        reset_preview_shared_cache();
 
         D3D11_TEXTURE2D_DESC desc = {};
         desc.Width = (UINT)req_w;
@@ -160,13 +171,23 @@ void imgui_update_preview_d3d11(void* d3d11_texture, int width, int height) {
             if (SUCCEEDED(srcTex->QueryInterface(__uuidof(IDXGIResource), (void**)&dxgiRes)) && dxgiRes) {
                 HANDLE sharedHandle = NULL;
                 if (SUCCEEDED(dxgiRes->GetSharedHandle(&sharedHandle)) && sharedHandle) {
-                    ID3D11Texture2D* openedTex = NULL;
-                    if (SUCCEEDED(g_pd3dDevice->OpenSharedResource(sharedHandle, __uuidof(ID3D11Texture2D), (void**)&openedTex)) && openedTex) {
-                        g_pd3dDeviceContext->CopyResource((ID3D11Resource*)g_pPreviewTexture, (ID3D11Resource*)openedTex);
-                        openedTex->Release();
+                    if (g_previewSharedHandle != sharedHandle || !g_pPreviewSharedOpenedTexture) {
+                        reset_preview_shared_cache();
+                        if (FAILED(g_pd3dDevice->OpenSharedResource(sharedHandle, __uuidof(ID3D11Texture2D), (void**)&g_pPreviewSharedOpenedTexture)) || !g_pPreviewSharedOpenedTexture) {
+                            g_previewSharedHandle = NULL;
+                        } else {
+                            g_previewSharedHandle = sharedHandle;
+                        }
                     }
+                    if (g_pPreviewSharedOpenedTexture) {
+                        g_pd3dDeviceContext->CopyResource((ID3D11Resource*)g_pPreviewTexture, (ID3D11Resource*)g_pPreviewSharedOpenedTexture);
+                    }
+                } else {
+                    reset_preview_shared_cache();
                 }
                 dxgiRes->Release();
+            } else {
+                reset_preview_shared_cache();
             }
         }
         g_previewFrameCount++;
@@ -1906,6 +1927,7 @@ void imgui_window_render_ui(UiState* state) {
         if (g_previewCsInit) EnterCriticalSection(&g_previewCs);
         if (g_pPreviewSRV) { g_pPreviewSRV->Release(); g_pPreviewSRV = NULL; }
         if (g_pPreviewTexture) { g_pPreviewTexture->Release(); g_pPreviewTexture = NULL; }
+        reset_preview_shared_cache();
         g_previewWidth = 0;
         g_previewHeight = 0;
         if (g_previewCsInit) LeaveCriticalSection(&g_previewCs);
@@ -1959,6 +1981,7 @@ void imgui_window_destroy(void) {
     ImGui::DestroyContext();
 
     cleanup_render_target();
+    reset_preview_shared_cache();
     if (g_pSwapChain) { g_pSwapChain->Release(); g_pSwapChain = NULL; }
     if (g_pd3dDeviceContext) { g_pd3dDeviceContext->Release(); g_pd3dDeviceContext = NULL; }
     if (g_pd3dDevice) { g_pd3dDevice->Release(); g_pd3dDevice = NULL; }
