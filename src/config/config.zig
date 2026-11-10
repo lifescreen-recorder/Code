@@ -7,6 +7,7 @@ pub const VideoCodec = enum {
     h264,
     hevc,
     av1,
+    mjpeg,
 };
 
 pub const EncoderBackendType = enum {
@@ -15,6 +16,9 @@ pub const EncoderBackendType = enum {
     amf,
     qsv,
     software,
+    wmf,
+    openh264,
+    intel_msdk,
 };
 
 pub const RateControlMode = enum {
@@ -47,6 +51,11 @@ pub const ContainerFormat = enum {
     mkv,
     mp4,
     mov,
+    webm,
+    wmv,
+    flv,
+    f4v,
+    avchd,
 };
 
 pub const VideoConfig = struct {
@@ -56,6 +65,8 @@ pub const VideoConfig = struct {
     capture_cursor: bool = true,
     color_range: ColorRange = .limited,
     hdr_10bit: bool = false,
+    low_end_mode: bool = false,
+    low_end_auto_detect: bool = true,
 };
 
 pub const EncoderConfig = struct {
@@ -67,18 +78,41 @@ pub const EncoderConfig = struct {
     preset: PresetQuality = .ultra_fast,
     keyframe_interval_secs: u32 = 2,
     container: ContainerFormat = .mkv,
+    qsv_low_power: bool = true,
+    qsv_async_depth: u32 = 1,
+    wmf_scenario: u32 = 1,
+    wmf_rate_control: u32 = 2,
+    wmf_quality: u32 = 70,
+    wmf_hw_encoding: bool = true,
+    x264_tune: u32 = 0,
+    x264_profile: u32 = 0,
+    x264_threads: u32 = 0,
+    openh264_slices: u32 = 1,
+    mjpeg_qscale: u32 = 3,
+    mjpeg_huffman: u32 = 1,
 };
 
 pub const AudioConfig = struct {
     system_audio_enabled: bool = true,
     system_audio_volume: f32 = 1.0, // 0.0 - 1.0
+    system_audio2_enabled: bool = false,
+    system_audio2_volume: f32 = 1.0,
     mic_enabled: bool = true,
     mic_volume: f32 = 1.0,
+    mic2_enabled: bool = false,
+    mic2_volume: f32 = 1.0,
     audio_bitrate_kbps: u32 = 192,
     separate_tracks: bool = false,
     save_separate_audio_file: bool = false,
     selected_audio_output: u32 = 0, // 0 = default, 1..N = device index
     selected_audio_input: u32 = 0, // 0 = default, 1..N = device index
+    selected_audio_output2: u32 = 0,
+    selected_audio_input2: u32 = 0,
+    mic_noise_suppression: bool = false,
+    mic_ns_strength: f32 = 0.5,
+    mic_compressor: bool = false,
+    mic_comp_amount: f32 = 0.5,
+    mic_gain_db: f32 = 0.0,
 };
 
 pub const OutputConfig = struct {

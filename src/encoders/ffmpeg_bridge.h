@@ -21,11 +21,16 @@ extern "C" {
 #define ENCODER_CAP_QSV_AV1      (1 << 8)
 #define ENCODER_CAP_SW_X264      (1 << 9)
 #define ENCODER_CAP_SW_X265      (1 << 10)
+#define ENCODER_CAP_WMF_H264     (1 << 11)
+#define ENCODER_CAP_WMF_HEVC     (1 << 12)
+#define ENCODER_CAP_MJPEG        (1 << 13)
+#define ENCODER_CAP_OPENH264     (1 << 14)
 
 typedef enum {
     CODEC_H264 = 0,
     CODEC_HEVC = 1,
     CODEC_AV1  = 2,
+    CODEC_MJPEG = 3,
 } BridgeCodecType;
 
 typedef enum {
@@ -34,6 +39,9 @@ typedef enum {
     BACKEND_AMF      = 2,
     BACKEND_QSV      = 3,
     BACKEND_SOFTWARE = 4,
+    BACKEND_WMF        = 5,
+    BACKEND_OPENH264   = 6,
+    BACKEND_INTEL_MSDK = 7,
 } BridgeBackendType;
 
 typedef enum {
@@ -60,6 +68,19 @@ typedef struct {
     uint32_t src_height;        // Source capture height (0 = same as height)
     uint32_t color_range;       // 0 = Limited (MPEG), 1 = Full (JPEG)
     bool capture_cursor;
+    uint32_t qsv_low_power;
+    uint32_t qsv_async_depth;
+    uint32_t wmf_scenario;
+    uint32_t wmf_rate_control;
+    uint32_t wmf_quality;
+    uint32_t wmf_hw_encoding;
+    uint32_t x264_tune;
+    uint32_t x264_profile;
+    uint32_t x264_threads;
+    uint32_t openh264_slices;
+    uint32_t mjpeg_qscale;
+    uint32_t mjpeg_huffman;
+    uint32_t low_end_mode;
 } VideoEncoderConfig;
 
 typedef struct {
@@ -88,11 +109,13 @@ int ffmpeg_encoder_flush(VideoEncoderContext *ctx);
 void ffmpeg_encoder_destroy(VideoEncoderContext *ctx);
 
 // 3. Container Muxer (MKV, MP4, MOV)
+#define MAX_AUDIO_TRACKS 5
+
 typedef struct {
     uint32_t sample_rate;
     uint32_t channels;
     uint32_t bitrate_kbps;
-    uint32_t enable_multi_track;
+    uint32_t individual_track_count;
 } MuxerAudioStreamConfig;
 
 MuxerContext* ffmpeg_muxer_create(

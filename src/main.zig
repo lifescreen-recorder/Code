@@ -9,11 +9,24 @@ const is_windows = builtin.os.tag == .windows;
 const win32 = if (is_windows) struct {
     extern "kernel32" fn GetCommandLineA() callconv(.winapi) [*:0]const u8;
     extern "kernel32" fn AttachConsole(dwProcessId: u32) callconv(.winapi) i32;
+    extern "kernel32" fn GlobalMemoryStatusEx(lpBuffer: *MEMORYSTATUSEX) callconv(.winapi) i32;
     extern "winmm" fn timeBeginPeriod(uPeriod: u32) callconv(.winapi) u32;
     extern "winmm" fn timeEndPeriod(uPeriod: u32) callconv(.winapi) u32;
     extern "user32" fn SetProcessDPIAware() callconv(.winapi) i32;
     extern "user32" fn SetProcessDpiAwarenessContext(value: isize) callconv(.winapi) i32;
 } else struct {};
+
+const MEMORYSTATUSEX = extern struct {
+    dwLength: u32,
+    dwMemoryLoad: u32,
+    ullTotalPhys: u64,
+    ullAvailPhys: u64,
+    ullTotalPageFile: u64,
+    ullAvailPageFile: u64,
+    ullTotalVirtual: u64,
+    ullAvailVirtual: u64,
+    ullAvailExtendedVirtual: u64,
+};
 
 pub fn main() !void {
     if (is_windows) {
@@ -57,8 +70,47 @@ pub fn main() !void {
 
     var cfg = lifescreen.storage.loadFromFile(arena.allocator(), io, config_file);
 
+    if (cfg.video.low_end_auto_detect and !cfg.video.low_end_mode) {
+        var total_ram_gb: f64 = 0;
+        if (is_windows) {
+            var mem_status = std.mem.zeroes(MEMORYSTATUSEX);
+            mem_status.dwLength = @sizeOf(MEMORYSTATUSEX);
+            if (win32.GlobalMemoryStatusEx(&mem_status) != 0) {
+                total_ram_gb = @as(f64, @floatFromInt(mem_status.ullTotalPhys)) / (1024.0 * 1024.0 * 1024.0);
+            }
+        }
+        const cpu_cores = std.Thread.getCpuCount() catch 4;
+        if ((total_ram_gb > 0 and total_ram_gb <= 3.0) or cpu_cores <= 2) {
+            cfg.video.low_end_mode = true;
+            cfg.video.resolution_width = 1920;
+            cfg.video.resolution_height = 1080;
+            cfg.video.fps = 30;
+            log.info("Weak hardware detected ({d:.1} GB RAM, {d} cores): enabling Low-End PC Mode (1080p 30 FPS)", .{ total_ram_gb, cpu_cores });
+        }
+    }
+
     // Auto-select fastest hardware encoder and next-gen codec (Prioritizing AV1 on RTX 40/50, Arc, RDNA3/4)
-    if (caps.nvenc_av1 or caps.nvenc_hevc or caps.nvenc_h264) {
+    if (cfg.video.low_end_mode) {
+        if (caps.qsv_h264) {
+            cfg.encoder.preferred_backend = .qsv;
+            cfg.encoder.codec = .h264;
+            cfg.encoder.qsv_low_power = true;
+            cfg.encoder.qsv_async_depth = 1;
+        } else if (caps.wmf_h264) {
+            cfg.encoder.preferred_backend = .wmf;
+            cfg.encoder.codec = .h264;
+            cfg.encoder.wmf_hw_encoding = true;
+        } else if (caps.nvenc_h264) {
+            cfg.encoder.preferred_backend = .nvenc;
+            cfg.encoder.codec = .h264;
+        } else if (caps.amf_h264) {
+            cfg.encoder.preferred_backend = .amf;
+            cfg.encoder.codec = .h264;
+        } else {
+            cfg.encoder.preferred_backend = .software;
+            cfg.encoder.codec = .h264;
+        }
+    } else if (caps.nvenc_av1 or caps.nvenc_hevc or caps.nvenc_h264) {
         cfg.encoder.preferred_backend = .nvenc;
         if (caps.nvenc_av1) {
             cfg.encoder.codec = .av1;
@@ -76,6 +128,9 @@ pub fn main() !void {
             cfg.encoder.codec = .av1;
             log.info("Auto-selected Next-Gen Hardware AV1 (AMD AMF AV1)", .{});
         }
+    } else if (caps.wmf_h264 or caps.wmf_hevc) {
+        cfg.encoder.preferred_backend = .wmf;
+        log.info("Auto-selected Windows Media Foundation hardware encoder (integrated GPU offload)", .{});
     } else {
         cfg.encoder.preferred_backend = .software;
     }

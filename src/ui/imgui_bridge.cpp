@@ -10,6 +10,9 @@
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
+#include <mmdeviceapi.h>
+#include <audiopolicy.h>
+#include <psapi.h>
 
 #ifndef LIFESCREEN_VERSION
 #define LIFESCREEN_VERSION "0.1.0"
@@ -25,6 +28,238 @@ static inline const char* tr(int lang, const char* en, const char* uk, const cha
         case 4: return fr;
         case 5: return pl;
         default: return en;
+    }
+}
+
+struct AppAudioSession {
+    DWORD pid;
+    char name[128];
+    float volume;
+    bool mute;
+    bool valid;
+};
+
+#define MAX_AUDIO_SESSIONS 32
+static AppAudioSession g_audioSessions[MAX_AUDIO_SESSIONS];
+static int g_audioSessionCount = 0;
+static DWORD g_lastAudioSessionRefresh = 0;
+static bool g_showAppMixerPopup = false;
+
+static void refresh_audio_sessions(void) {
+    IMMDeviceEnumerator *pEnumerator = NULL;
+    HRESULT hr = CoCreateInstance(
+        __uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL,
+        __uuidof(IMMDeviceEnumerator), (void**)&pEnumerator
+    );
+    if (FAILED(hr) || !pEnumerator) return;
+
+    IMMDevice *pDevice = NULL;
+    hr = pEnumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &pDevice);
+    pEnumerator->Release();
+    if (FAILED(hr) || !pDevice) return;
+
+    IAudioSessionManager2 *pSessionManager = NULL;
+    hr = pDevice->Activate(
+        __uuidof(IAudioSessionManager2), CLSCTX_ALL, NULL, (void**)&pSessionManager
+    );
+    pDevice->Release();
+    if (FAILED(hr) || !pSessionManager) return;
+
+    IAudioSessionEnumerator *pSessionEnum = NULL;
+    hr = pSessionManager->GetSessionEnumerator(&pSessionEnum);
+    pSessionManager->Release();
+    if (FAILED(hr) || !pSessionEnum) return;
+
+    int count = 0;
+    pSessionEnum->GetCount(&count);
+
+    g_audioSessionCount = 0;
+    DWORD currentPid = GetCurrentProcessId();
+
+    for (int i = 0; i < count && g_audioSessionCount < MAX_AUDIO_SESSIONS; i++) {
+        IAudioSessionControl *pBasicControl = NULL;
+        if (FAILED(pSessionEnum->GetSession(i, &pBasicControl)) || !pBasicControl) continue;
+
+        IAudioSessionControl2 *pControl2 = NULL;
+        hr = pBasicControl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&pControl2);
+        pBasicControl->Release();
+        if (FAILED(hr) || !pControl2) continue;
+
+        AudioSessionState state;
+        pControl2->GetState(&state);
+        if (state == AudioSessionStateExpired) {
+            pControl2->Release();
+            continue;
+        }
+
+        DWORD pid = 0;
+        pControl2->GetProcessId(&pid);
+
+        if (pid == currentPid) {
+            pControl2->Release();
+            continue;
+        }
+
+        char appName[128] = "System Sounds";
+        if (pControl2->IsSystemSoundsSession() == S_OK) {
+            snprintf(appName, sizeof(appName), "System Sounds");
+        } else if (pid > 0) {
+            HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+            if (hProcess) {
+                char fullPath[MAX_PATH] = {0};
+                DWORD pathLen = MAX_PATH;
+                if (QueryFullProcessImageNameA(hProcess, 0, fullPath, &pathLen)) {
+                    const char *slash = strrchr(fullPath, '\\');
+                    const char *base = slash ? slash + 1 : fullPath;
+                    snprintf(appName, sizeof(appName), "%s", base);
+                }
+                CloseHandle(hProcess);
+            } else {
+                snprintf(appName, sizeof(appName), "App (PID %lu)", pid);
+            }
+        }
+
+        ISimpleAudioVolume *pSimpleVolume = NULL;
+        hr = pControl2->QueryInterface(__uuidof(ISimpleAudioVolume), (void**)&pSimpleVolume);
+        if (SUCCEEDED(hr) && pSimpleVolume) {
+            float vol = 1.0f;
+            BOOL mute = FALSE;
+            pSimpleVolume->GetMasterVolume(&vol);
+            pSimpleVolume->GetMute(&mute);
+
+            bool exists = false;
+            for (int s = 0; s < g_audioSessionCount; s++) {
+                if (g_audioSessions[s].pid == pid && pid != 0) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists) {
+                AppAudioSession &sess = g_audioSessions[g_audioSessionCount++];
+                sess.pid = pid;
+                snprintf(sess.name, sizeof(sess.name), "%s", appName);
+                sess.volume = vol;
+                sess.mute = mute ? true : false;
+                sess.valid = true;
+            }
+            pSimpleVolume->Release();
+        }
+        pControl2->Release();
+    }
+
+    pSessionEnum->Release();
+    g_lastAudioSessionRefresh = GetTickCount();
+}
+
+static void apply_app_volume(DWORD pid, float volume, bool mute) {
+    if (pid == 0) return;
+
+    IMMDeviceEnumerator *pEnumerator = NULL;
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (void**)&pEnumerator)) || !pEnumerator) return;
+
+    IMMDevice *pDevice = NULL;
+    if (FAILED(pEnumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &pDevice)) || !pDevice) {
+        pEnumerator->Release();
+        return;
+    }
+    pEnumerator->Release();
+
+    IAudioSessionManager2 *pSessionManager = NULL;
+    if (FAILED(pDevice->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, NULL, (void**)&pSessionManager)) || !pSessionManager) {
+        pDevice->Release();
+        return;
+    }
+    pDevice->Release();
+
+    IAudioSessionEnumerator *pSessionEnum = NULL;
+    if (FAILED(pSessionManager->GetSessionEnumerator(&pSessionEnum)) || !pSessionEnum) {
+        pSessionManager->Release();
+        return;
+    }
+    pSessionManager->Release();
+
+    int count = 0;
+    pSessionEnum->GetCount(&count);
+
+    for (int i = 0; i < count; i++) {
+        IAudioSessionControl *pBasicControl = NULL;
+        if (FAILED(pSessionEnum->GetSession(i, &pBasicControl)) || !pBasicControl) continue;
+
+        IAudioSessionControl2 *pControl2 = NULL;
+        HRESULT hr = pBasicControl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&pControl2);
+        pBasicControl->Release();
+        if (FAILED(hr) || !pControl2) continue;
+
+        DWORD sessionPid = 0;
+        pControl2->GetProcessId(&sessionPid);
+
+        if (sessionPid == pid) {
+            ISimpleAudioVolume *pSimpleVolume = NULL;
+            hr = pControl2->QueryInterface(__uuidof(ISimpleAudioVolume), (void**)&pSimpleVolume);
+            if (SUCCEEDED(hr) && pSimpleVolume) {
+                pSimpleVolume->SetMasterVolume(volume, NULL);
+                pSimpleVolume->SetMute(mute ? TRUE : FALSE, NULL);
+                pSimpleVolume->Release();
+            }
+            pControl2->Release();
+            break;
+        }
+        pControl2->Release();
+    }
+    pSessionEnum->Release();
+}
+
+static void render_app_audio_mixer_ui(int lang) {
+    DWORD now = GetTickCount();
+    if (now - g_lastAudioSessionRefresh > 2000 || g_audioSessionCount == 0) {
+        refresh_audio_sessions();
+    }
+
+    ImGui::TextColored(ImVec4(0.20f, 0.65f, 1.00f, 1.00f), "%s",
+        tr(lang,
+            "Per-Application Volume Mixer (Adjust before recording):",
+            "Гучність активних додатків (налаштування перед записом):",
+            "活动应用程序音量独立调节 (录制前设置):",
+            "Lautstärke aktiver Anwendungen (Vor Aufnahme anpassen):",
+            "Mixeur de volume par application (Ajuster avant l'enregistrement) :",
+            "Głośność aktywnych aplikacji (Dostosuj przed nagrywaniem):"));
+    ImGui::Spacing();
+
+    if (ImGui::Button(tr(lang, "Refresh Application List", "Оновити список додатків", "刷新应用程序列表", "Anwendungsliste aktualisieren", "Actualiser la liste", "Odśwież listę aplikacji"))) {
+        refresh_audio_sessions();
+    }
+
+    ImGui::Spacing();
+
+    if (g_audioSessionCount == 0) {
+        ImGui::TextDisabled("%s", tr(lang, "No active audio-producing applications detected.", "Немає активних додатків, що відтворюють звук.", "未检测到正在发声的应用程序。", "Keine aktiven Audioanwendungen erkannt.", "Aucune application audio active détectée.", "Nie wykryto aplikacji odtwarzających dźwięk."));
+    } else {
+        for (int i = 0; i < g_audioSessionCount; i++) {
+            AppAudioSession &sess = g_audioSessions[i];
+            ImGui::PushID(i * 100);
+
+            bool mute = sess.mute;
+            if (ImGui::Checkbox("##mute", &mute)) {
+                sess.mute = mute;
+                apply_app_volume(sess.pid, sess.volume, sess.mute);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", sess.mute ? tr(lang, "Unmute", "Увімкнути звук", "取消静音", "Stummschaltung aufheben", "Rétablir le son", "Wyłącz wyciszenie") : tr(lang, "Mute", "Вимкнути звук", "静音", "Stummschalten", "Couper le son", "Wycisz"));
+            }
+
+            ImGui::SameLine();
+            int vol_percent = (int)(sess.volume * 100.0f + 0.5f);
+            char label[256];
+            snprintf(label, sizeof(label), "%s (%d%%)", sess.name, vol_percent);
+
+            ImGui::SetNextItemWidth(200.0f);
+            if (ImGui::SliderInt(label, &vol_percent, 0, 100)) {
+                sess.volume = vol_percent / 100.0f;
+                apply_app_volume(sess.pid, sess.volume, sess.mute);
+            }
+
+            ImGui::PopID();
+        }
     }
 }
 
@@ -1045,6 +1280,19 @@ void imgui_window_render_ui(UiState* state) {
                 ImGui::SameLine();
                 ImGui::ProgressBar(state->record_microphone ? state->mic_audio_level : 0.0f, ImVec2(meter_w, 20), "");
                 ImGui::EndDisabled();
+
+                ImGui::Spacing();
+                if (ImGui::Checkbox(tr(lang, "Noise Supp.", "Шумоподав", "降噪", "Rauschunt.", "Anti-bruit", "Red. szumu"), &state->mic_noise_suppression)) {
+                    state->action_settings_changed = true;
+                }
+                ImGui::SameLine();
+                if (ImGui::Checkbox(tr(lang, "Compressor", "Компресор", "压缩器", "Kompressor", "Compresseur", "Kompresor"), &state->mic_compressor)) {
+                    state->action_settings_changed = true;
+                }
+                ImGui::SameLine();
+                if (ImGui::Checkbox(tr(lang, "Multi-Track", "Мульти-трек", "多音轨", "Multi-Spur", "Multi-piste", "Wielościeżk."), &state->separate_audio_tracks)) {
+                    state->action_settings_changed = true;
+                }
             }
             ImGui::EndChild();
             ImGui::PopStyleColor();
@@ -1399,6 +1647,45 @@ void imgui_window_render_ui(UiState* state) {
                             state->action_settings_changed = true;
                         }
 
+                        bool low_end_changed = false;
+                        if (ImGui::Checkbox(
+                                tr(lang,
+                                    "Weak PC Mode (Pentium / 2GB RAM)",
+                                    "Режим слабкого ПК (Pentium / 2 ГБ ОЗП)",
+                                    "弱电脑模式 (奔腾 / 2GB 内存)",
+                                    "Schwacher PC Modus (Pentium / 2GB RAM)",
+                                    "Mode PC faible (Pentium / 2 Go RAM)",
+                                    "Tryb słabego PC (Pentium / 2GB RAM)"),
+                                &state->low_end_mode)) {
+                            low_end_changed = true;
+                        }
+                        ImGui::TextDisabled("%s",
+                            tr(lang,
+                                "  Optimized for 2GB RAM & Pentium iGPU: 1080p + 30 FPS with hardware GPU encoding.",
+                                "  Оптимізовано для 2 ГБ ОЗП та Pentium iGPU: 1080p + 30 FPS з апаратним кодуванням.",
+                                "  针对 2GB 内存与奔腾核显优化: 1080p + 30 FPS 硬件加速编码。",
+                                "  Optimiert für 2GB RAM & Pentium iGPU: 1080p + 30 FPS mit Hardware-GPU-Codierung.",
+                                "  Optimisé pour 2 Go RAM & Pentium iGPU : 1080p + 30 FPS avec encodage matériel GPU.",
+                                "  Zoptymalizowano dla 2GB RAM i Pentium iGPU: 1080p + 30 FPS ze sprzętowym kodowaniem GPU."));
+                        if (low_end_changed) {
+                            state->action_settings_changed = true;
+                            if (state->low_end_mode) {
+                                state->output_resolution = 1;
+                                state->target_fps = 30;
+                                state->encoder_preset = 0;
+                                if ((state->encoder_caps_mask & (1 << 6)) != 0) {
+                                    state->encoder_choice = 0;
+                                    state->qsv_low_power = true;
+                                    state->qsv_async_depth = 1;
+                                } else if ((state->encoder_caps_mask & (1 << 11)) != 0) {
+                                    state->encoder_choice = 4;
+                                    state->wmf_hw_encoding = true;
+                                } else if ((state->encoder_caps_mask & ((1 << 0) | (1 << 3))) != 0) {
+                                    state->encoder_choice = 3;
+                                }
+                            }
+                        }
+
                         ImGui::Spacing();
                         ImGui::Separator();
                         ImGui::Spacing();
@@ -1414,172 +1701,301 @@ void imgui_window_render_ui(UiState* state) {
                         ImGui::Spacing();
 
                         // 1. Dynamic filtered backends based on detected hardware
-                        bool has_nvenc = (state->encoder_caps_mask & ((1 << 0) | (1 << 1) | (1 << 2))) != 0;
-                        bool has_amf   = (state->encoder_caps_mask & ((1 << 3) | (1 << 4) | (1 << 5))) != 0;
-                        bool has_qsv   = (state->encoder_caps_mask & ((1 << 6) | (1 << 7) | (1 << 8))) != 0;
+                        static bool s_show_all_encoders = false;
+                        bool has_qsv_h264 = (state->encoder_caps_mask & (1 << 6)) != 0;
+                        bool has_qsv_hevc = (state->encoder_caps_mask & (1 << 7)) != 0;
+                        bool has_nvenc    = (state->encoder_caps_mask & ((1 << 0) | (1 << 1) | (1 << 2))) != 0;
+                        bool has_amf      = (state->encoder_caps_mask & ((1 << 3) | (1 << 4) | (1 << 5))) != 0;
+                        bool has_wmf_h264 = (state->encoder_caps_mask & (1 << 11)) != 0;
 
-                        struct BackendItem {
+                        struct FilteredEncoderChoice {
                             int id;
-                            const char* label;
+                            const char* label_supported;
+                            const char* label_unsupported;
+                            bool supported;
                         };
-                        BackendItem avail_backends[4];
+
+                        FilteredEncoderChoice all_choices[8] = {
+                            { 0, "QuickSync H.264 (Intel QSV) [Hardware]", "QuickSync H.264 (Intel QSV) [Unsupported]", has_qsv_h264 },
+                            { 1, "QuickSync HEVC (Intel QSV) [Hardware]", "QuickSync HEVC (Intel QSV) [Unsupported]", has_qsv_hevc },
+                            { 2, "Intel Media SDK (oneVPL / QSV Hardware)", "Intel Media SDK (oneVPL) [Unsupported]", has_qsv_h264 },
+                            { 3, "FFmpeg Hardware Encoders (NVENC / AMF)", "FFmpeg Hardware (NVENC/AMF) [No NVENC/AMF GPU]", has_nvenc || has_amf },
+                            { 4, "Windows Media Foundation (WMF / IMFTransform)", "Windows Media Foundation (WMF) [Unsupported]", has_wmf_h264 },
+                            { 5, "OpenH264 (Cisco Baseline)", "OpenH264 (Cisco Baseline)", true },
+                            { 6, "libx264 (Software CPU)", "libx264 (Software CPU)", true },
+                            { 7, "Motion JPEG (MJPEG)", "Motion JPEG (MJPEG)", true }
+                        };
+
+                        const char* avail_labels[8];
+                        int avail_ids[8];
                         int avail_count = 0;
-                        if (has_nvenc) avail_backends[avail_count++] = { 0, "NVIDIA NVENC (Hardware)" };
-                        if (has_amf)   avail_backends[avail_count++] = { 1, "AMD AMF (Hardware)" };
-                        if (has_qsv)   avail_backends[avail_count++] = { 2, "Intel QuickSync (Hardware)" };
-                        avail_backends[avail_count++] = { 3, tr(lang, "Software (CPU - libx264)", "Програмний (CPU - libx264)", "软件编码 (CPU - libx264)", "Software (CPU - libx264)", "Logiciel (CPU - libx264)", "Programowy (CPU - libx264)") };
+                        int current_filtered_idx = 0;
 
-                        int current_backend_idx = 0;
-                        for (int i = 0; i < avail_count; i++) {
-                            if (avail_backends[i].id == state->encoder_backend) {
-                                current_backend_idx = i;
+                        for (int i = 0; i < 8; i++) {
+                            if (s_show_all_encoders || all_choices[i].supported) {
+                                if (all_choices[i].id == state->encoder_choice) {
+                                    current_filtered_idx = avail_count;
+                                }
+                                avail_ids[avail_count] = all_choices[i].id;
+                                avail_labels[avail_count] = all_choices[i].supported ? all_choices[i].label_supported : all_choices[i].label_unsupported;
+                                avail_count++;
+                            }
+                        }
+
+                        if (avail_count == 0) {
+                            avail_ids[0] = 6;
+                            avail_labels[0] = "libx264 (Software CPU)";
+                            avail_count = 1;
+                            current_filtered_idx = 0;
+                        }
+
+                        if (ImGui::Combo(
+                            tr(lang, "Encoder Engine", "Рушій енкодера", "编码引擎与架构", "Encoder-Engine", "Moteur d'encodage", "Silnik enkodera"),
+                            &current_filtered_idx, avail_labels, avail_count)) {
+                            state->encoder_choice = avail_ids[current_filtered_idx];
+                            state->action_settings_changed = true;
+                        }
+
+                        bool current_is_supported = false;
+                        for (int i = 0; i < 8; i++) {
+                            if (all_choices[i].id == state->encoder_choice && all_choices[i].supported) {
+                                current_is_supported = true;
                                 break;
                             }
                         }
 
-                        const char* backend_labels[4];
-                        for (int i = 0; i < avail_count; i++) backend_labels[i] = avail_backends[i].label;
-
-                        if (ImGui::Combo(
-                            tr(lang, "Encoder Backend", "Бекенд енкодера", "编码器后端", "Encoder-Backend", "Backend d'encodage", "Backend enkodera"),
-                            &current_backend_idx, backend_labels, avail_count)) {
-                            state->encoder_backend = avail_backends[current_backend_idx].id;
-                            state->action_settings_changed = true;
-                        }
-
-                        // 2. Dynamic filtered codecs based on selected backend
-                        bool can_h264 = true;
-                        bool can_hevc = false;
-                        bool can_av1  = false;
-
-                        if (state->encoder_backend == 0) {
-                            can_h264 = (state->encoder_caps_mask & (1 << 0)) != 0;
-                            can_hevc = (state->encoder_caps_mask & (1 << 1)) != 0;
-                            can_av1  = (state->encoder_caps_mask & (1 << 2)) != 0;
-                        } else if (state->encoder_backend == 1) {
-                            can_h264 = (state->encoder_caps_mask & (1 << 3)) != 0;
-                            can_hevc = (state->encoder_caps_mask & (1 << 4)) != 0;
-                            can_av1  = (state->encoder_caps_mask & (1 << 5)) != 0;
-                        } else if (state->encoder_backend == 2) {
-                            can_h264 = (state->encoder_caps_mask & (1 << 6)) != 0;
-                            can_hevc = (state->encoder_caps_mask & (1 << 7)) != 0;
-                            can_av1  = (state->encoder_caps_mask & (1 << 8)) != 0;
+                        if (current_is_supported) {
+                            ImGui::TextColored(ImVec4(0.20f, 0.85f, 0.35f, 1.00f), "%s",
+                                tr(lang,
+                                    "  [OK] Supported by your hardware and verified.",
+                                    "  [OK] Повністю підтримується вашим обладнанням та готовий до роботи.",
+                                    "  [OK] 经检测受硬件完全支持。",
+                                    "  [OK] Von Ihrer Hardware unterstützt und geprüft.",
+                                    "  [OK] Pris en charge par votre matériel et vérifié.",
+                                    "  [OK] Obsługiwane przez twój sprzęt i zweryfikowane."));
                         } else {
-                            can_h264 = (state->encoder_caps_mask & (1 << 9)) != 0;
-                            can_hevc = (state->encoder_caps_mask & (1 << 10)) != 0;
-                            can_av1  = false;
+                            ImGui::TextColored(ImVec4(1.00f, 0.40f, 0.20f, 1.00f), "%s",
+                                tr(lang,
+                                    "  [WARNING] Not supported by this GPU (e.g. MX330 lacks NVENC). Fallback will be used.",
+                                    "  [УВАГА] Не підтримується цим GPU (наприклад, у MX330 немає NVENC). Запис перейде на CPU.",
+                                    "  [警告] 当前 GPU 不支持此编码器 (例如 MX330 缺少 NVENC 模块)。将使用备用方案。",
+                                    "  [WARNUNG] Wird von dieser GPU nicht unterstützt. Fallback wird verwendet.",
+                                    "  [AVERTISSEMENT] Non pris en charge par ce GPU. Le repli sera utilisé.",
+                                    "  [OSTRZEŻENIE] Nieobsługiwane przez ten GPU. Zostanie użyty fallback."));
                         }
 
-                        struct CodecItem {
-                            int id;
-                            const char* label;
-                        };
-                        CodecItem avail_codecs[3];
-                        int codec_count = 0;
-                        if (can_h264) avail_codecs[codec_count++] = { 0, "H.264 (AVC)" };
-                        if (can_hevc) avail_codecs[codec_count++] = { 1, "HEVC (H.265)" };
-                        if (can_av1)  avail_codecs[codec_count++] = { 2, "AV1 (Next-Gen 2026)" };
+                        if (ImGui::Checkbox(
+                            tr(lang, "Show unsupported encoders", "Показати непідтримувані рушії", "显示不支持的编码器", "Nicht unterstützte Encoder anzeigen", "Afficher les encodeurs non pris en charge", "Pokaż nieobsługiwane enkodery"),
+                            &s_show_all_encoders)) {
+                        }
 
-                        int current_codec_idx = 0;
-                        for (int i = 0; i < codec_count; i++) {
-                            if (avail_codecs[i].id == state->video_codec) {
-                                current_codec_idx = i;
-                                break;
+                        ImGui::Spacing();
+                        ImGui::Separator();
+                        ImGui::Spacing();
+
+                        ImGui::TextColored(ImVec4(0.20f, 0.65f, 1.00f, 1.00f), "%s",
+                            tr(lang,
+                                "Encoder Specific Settings:",
+                                "Індивідуальні налаштування кодека:",
+                                "当前编码器专用设置:",
+                                "Encoder-spezifische Einstellungen:",
+                                "Paramètres spécifiques à l'encodeur :",
+                                "Ustawienia wybranego enkodera:"));
+                        ImGui::Spacing();
+
+                        if (state->encoder_choice == 0 || state->encoder_choice == 1) {
+                            const char* qsv_presets[] = { "veryfast", "faster", "fast", "medium", "slow" };
+                            if (ImGui::Combo(tr(lang, "QuickSync Preset", "Пресет QuickSync", "QuickSync 预设", "QuickSync Preset", "Préréglage QuickSync", "Preset QuickSync"), &state->qsv_preset, qsv_presets, 5)) {
+                                state->action_settings_changed = true;
                             }
+                            if (ImGui::Checkbox(tr(lang, "Low Power Mode (Intel VDENC Fixed-Function ASIC)", "Режим енергозбереження (Intel VDENC)", "低功耗模式 (Intel VDENC 固定功能硬件)", "Low-Power-Modus (Intel VDENC)", "Mode basse consommation (Intel VDENC)", "Tryb niskiego poboru mocy (Intel VDENC)"), &state->qsv_low_power)) {
+                                state->action_settings_changed = true;
+                            }
+                            if (ImGui::SliderInt(tr(lang, "Async Depth", "Асинхронна черга", "异步深度", "Async-Tiefe", "Profondeur asynchrone", "Głębokość asynchroniczna"), &state->qsv_async_depth, 1, 4)) {
+                                state->action_settings_changed = true;
+                            }
+                        } else if (state->encoder_choice == 2) {
+                            const char* msdk_codecs[] = { "H.264 (AVC)", "HEVC (H.265)", "Motion JPEG (MJPEG)" };
+                            if (ImGui::Combo(tr(lang, "Intel Media SDK Codec", "Кодек Intel Media SDK", "Intel Media SDK 编解码器", "Intel Media SDK Codec", "Codec Intel Media SDK", "Kodek Intel Media SDK"), &state->intel_msdk_codec, msdk_codecs, 3)) {
+                                state->action_settings_changed = true;
+                            }
+                            if (ImGui::Checkbox(tr(lang, "Low Power Hardware Engine", "Апаратний Low Power рушій", "低功耗硬件引擎", "Low-Power-Hardware-Engine", "Moteur matériel basse consommation", "Silnik sprzętowy Low Power"), &state->qsv_low_power)) {
+                                state->action_settings_changed = true;
+                            }
+                            if (ImGui::SliderInt(tr(lang, "Media SDK Pipeline Depth", "Глибина конвеєра", "流水线深度", "Pipeline-Tiefe", "Profondeur de pipeline", "Głębokość potoku"), &state->qsv_async_depth, 1, 4)) {
+                                state->action_settings_changed = true;
+                            }
+                        } else if (state->encoder_choice == 3) {
+                            const char* hw_engines[] = {
+                                tr(lang, "Auto-Detect Hardware GPU", "Автовизначення GPU", "自动检测 GPU 硬件", "Hardware-GPU automatisch erkennen", "Détection automatique du GPU matériel", "Automatyczne wykrywanie GPU"),
+                                "NVIDIA NVENC",
+                                "AMD AMF"
+                            };
+                            if (ImGui::Combo(tr(lang, "GPU Hardware", "Апаратний GPU", "GPU 硬件", "GPU-Hardware", "Matériel GPU", "Sprzęt GPU"), &state->ffmpeg_hw_engine, hw_engines, 3)) {
+                                state->action_settings_changed = true;
+                            }
+                            const char* hw_codecs[] = { "H.264 (AVC)", "HEVC (H.265)", "AV1" };
+                            if (ImGui::Combo(tr(lang, "Hardware Codec", "Апаратний кодек", "硬件编解码器", "Hardware-Codec", "Codec matériel", "Kodek sprzętowy"), &state->ffmpeg_hw_codec, hw_codecs, 3)) {
+                                state->action_settings_changed = true;
+                            }
+                            const char* hw_presets[] = { "P1 (Fastest / Lowest Latency)", "P2 (Fast)", "P4 (Medium / Balanced)", "P6 (High Quality)", "P7 (Max Quality)" };
+                            if (ImGui::Combo(tr(lang, "GPU Preset", "Пресет GPU", "GPU 预设", "GPU-Preset", "Préréglage GPU", "Preset GPU"), &state->ffmpeg_hw_preset, hw_presets, 5)) {
+                                state->action_settings_changed = true;
+                            }
+                            if (ImGui::Checkbox(tr(lang, "Zero-Latency Ultra Low Delay Mode", "Режим нульової затримки (Ultra Low Delay)", "零延迟超低延迟模式", "Zero-Latency-Modus", "Mode latence zéro", "Tryb zerowego opóźnienia"), &state->ffmpeg_hw_zerolatency)) {
+                                state->action_settings_changed = true;
+                            }
+                        } else if (state->encoder_choice == 4) {
+                            const char* wmf_codecs[] = { "H.264 (via MediaFoundation)", "HEVC (via MediaFoundation)" };
+                            if (ImGui::Combo(tr(lang, "WMF Codec", "Кодек WMF", "WMF 编解码器", "WMF-Codec", "Codec WMF", "Kodek WMF"), &state->wmf_codec, wmf_codecs, 2)) {
+                                state->action_settings_changed = true;
+                            }
+                            const char* wmf_rc_modes[] = {
+                                "CBR (Constant Bitrate)",
+                                "Peak Constrained VBR",
+                                "Unconstrained VBR",
+                                "Quality Mode",
+                                "Low Delay VBR"
+                            };
+                            if (ImGui::Combo(tr(lang, "WMF Rate Control", "Керування бітрейтом WMF", "WMF 码率控制", "WMF-Bitratensteuerung", "Contrôle du débit WMF", "Kontrola bitrate WMF"), &state->wmf_rate_control, wmf_rc_modes, 5)) {
+                                state->action_settings_changed = true;
+                            }
+                            const char* wmf_scenarios[] = {
+                                "Display Remoting (Desktop / Game Capture)",
+                                "Live Streaming",
+                                "Camera Record",
+                                "Archive"
+                            };
+                            if (ImGui::Combo(tr(lang, "WMF Scenario", "Сценарій використання WMF", "WMF 应用场景", "WMF-Szenario", "Scénario WMF", "Scenariusz WMF"), &state->wmf_scenario, wmf_scenarios, 4)) {
+                                state->action_settings_changed = true;
+                            }
+                            if (ImGui::SliderInt(tr(lang, "WMF Quality Factor (1-100)", "Рівень якості WMF (1-100)", "WMF 画质系数 (1-100)", "WMF-Qualitätsfaktor (1-100)", "Facteur de qualité WMF (1-100)", "Współczynnik якості WMF (1-100)"), &state->wmf_quality, 1, 100)) {
+                                state->action_settings_changed = true;
+                            }
+                            if (ImGui::Checkbox(tr(lang, "Force Hardware Encoding (IMFTransform MFT)", "Примусово апаратний MFT (IMFTransform)", "强制硬件 MFT 编码 (IMFTransform)", "Hardware-MFT erzwingen (IMFTransform)", "Forcer l'encodage matériel MFT (IMFTransform)", "Wymuś sprzętowy MFT (IMFTransform)"), &state->wmf_hw_encoding)) {
+                                state->action_settings_changed = true;
+                            }
+                        } else if (state->encoder_choice == 5) {
+                            const char* op_profiles[] = { "Constrained Baseline (Cisco)", "Main Profile", "High Profile" };
+                            if (ImGui::Combo(tr(lang, "OpenH264 Profile", "Профіль OpenH264", "OpenH264 配置规范", "OpenH264-Profil", "Profil OpenH264", "Profil OpenH264"), &state->openh264_profile, op_profiles, 3)) {
+                                state->action_settings_changed = true;
+                            }
+                            const char* op_slices[] = { "1 Slice (Single Thread)", "2 Slices (Dual Thread)", "4 Slices (Quad Parallel)" };
+                            if (ImGui::Combo(tr(lang, "Slice Count", "Кількість слайсів", "切片数量", "Slice-Anzahl", "Nombre de tranches", "Liczba slice"), &state->openh264_slices, op_slices, 3)) {
+                                state->action_settings_changed = true;
+                            }
+                            const char* op_rc[] = { "Bitrate Mode", "Quality Mode" };
+                            if (ImGui::Combo(tr(lang, "Rate Control Mode", "Режим бітрейту", "码率控制模式", "Bitraten-Modus", "Mode de contrôle du débit", "Tryb kontroli bitrate"), &state->openh264_rc_mode, op_rc, 2)) {
+                                state->action_settings_changed = true;
+                            }
+                        } else if (state->encoder_choice == 6) {
+                            const char* x264_presets[] = { "Ultrafast", "Superfast", "Veryfast", "Faster", "Fast", "Medium", "Slow" };
+                            if (ImGui::Combo(tr(lang, "x264 Preset", "Пресет x264", "x264 速度预设", "x264-Preset", "Préréglage x264", "Preset x264"), &state->x264_preset, x264_presets, 7)) {
+                                state->action_settings_changed = true;
+                            }
+                            const char* x264_tunes[] = { "Zero Latency (Game recording)", "Film", "Animation" };
+                            if (ImGui::Combo(tr(lang, "x264 Tune", "Тюнінг x264", "x264 调优", "x264-Abstimmung", "Optimisation x264", "Dostrojenie x264"), &state->x264_tune, x264_tunes, 3)) {
+                                state->action_settings_changed = true;
+                            }
+                            const char* x264_profs[] = { "High", "Main", "Baseline" };
+                            if (ImGui::Combo(tr(lang, "x264 Profile", "Профіль x264", "x264 配置规范", "x264-Profil", "Profil x264", "Profil x264"), &state->x264_profile, x264_profs, 3)) {
+                                state->action_settings_changed = true;
+                            }
+                            const char* x264_thr[] = { "Auto CPU Threads", "1 Thread", "2 Threads", "4 Threads", "8 Threads" };
+                            if (ImGui::Combo(tr(lang, "CPU Slice Threads", "Потоки CPU", "CPU 切片线程数", "CPU-Slice-Threads", "Threads de découpage CPU", "Wątki CPU"), &state->x264_threads, x264_thr, 5)) {
+                                state->action_settings_changed = true;
+                            }
+                        } else if (state->encoder_choice == 7) {
+                            if (ImGui::SliderInt(tr(lang, "JPEG Quality Scale (1 = Best, 31 = Lowest)", "Якість JPEG (1 = Найвища, 31 = Найнижча)", "JPEG 画质系数 (1 = 最高无损, 31 = 最低)", "JPEG-Qualitätsstufe (1 = Beste, 31 = Niedrigste)", "Qualité JPEG (1 = Meilleure, 31 = Plus basse)", "Jakość JPEG (1 = Najlepsza, 31 = Najniższa)"), &state->mjpeg_quality, 1, 31)) {
+                                state->action_settings_changed = true;
+                            }
+                            const char* huff_tables[] = { "Optimal Huffman Table (Better Compression)", "Default Standard Table (Faster)" };
+                            if (ImGui::Combo(tr(lang, "Huffman Table", "Таблиця Хаффмана", "哈夫曼表", "Huffman-Tabelle", "Table de Huffman", "Tablica Huffmana"), &state->mjpeg_huffman, huff_tables, 2)) {
+                                state->action_settings_changed = true;
+                            }
+                            const char* mjpeg_ranges[] = { "Full Range PC (0-255)", "Limited TV (16-235)" };
+                            if (ImGui::Combo(tr(lang, "MJPEG Color Range", "Колірний діапазон MJPEG", "MJPEG 色彩范围", "MJPEG-Farbbereich", "Plage de couleurs MJPEG", "Zakres kolorów MJPEG"), &state->mjpeg_color_range, mjpeg_ranges, 2)) {
+                                state->action_settings_changed = true;
+                            }
+                            ImGui::TextColored(ImVec4(0.35f, 0.88f, 0.55f, 1.00f), "%s",
+                                tr(lang,
+                                    "  Intra-Frame Only: Every frame is an independent JPEG. 0% lag in video editors (DaVinci / Premiere).",
+                                    "  Intra-Frame: Кожен кадр є окремим JPEG. Нульова затримка монтажу у Premiere / DaVinci.",
+                                    "  纯帧内编码: 每一帧均为独立 JPEG 图像。在剪辑软件 (DaVinci / Premiere) 中零延迟快速拖拽。",
+                                    "  Nur Intra-Frame: Jeder Frame ist ein separates JPEG. 0% Verzögerung beim Schneiden in DaVinci / Premiere.",
+                                    "  Intra-trame uniquement : chaque image est un JPEG indépendant. Zéro latence dans DaVinci / Premiere.",
+                                    "  Tylko klatki kluczowe: Każda klatka to niezależny JPEG. 0% opóźnień podczas montażu w DaVinci / Premiere."));
                         }
 
-                        const char* codec_labels[3];
-                        for (int i = 0; i < codec_count; i++) codec_labels[i] = avail_codecs[i].label;
-
-                        if (ImGui::Combo(
-                            tr(lang, "Video Codec", "Відеокодек", "视频编解码器", "Videocodec", "Codec vidéo", "Kodek wideo"),
-                            &current_codec_idx, codec_labels, codec_count)) {
-                            state->video_codec = avail_codecs[current_codec_idx].id;
-                            state->action_settings_changed = true;
-                        }
-
-                        // Rate Control Mode & Parameters
-                        const char* rate_modes[] = {
-                            tr(lang, "VBR (Variable Bitrate - Recommended)", "VBR (Змінний бітрейт - Рекомендовано)", "VBR (动态码率 - 推荐)", "VBR (Variable Bitrate - Empfohlen)", "VBR (Débit variable - Recommandé)", "VBR (Zmienny bitrate - Zalecane)"),
-                            tr(lang, "CBR (Constant Bitrate - Fixed)", "CBR (Постійний бітрейт - Стабільний)", "CBR (固定码率)", "CBR (Konstante Bitrate)", "CBR (Débit constant)", "CBR (Stały bitrate)"),
-                            tr(lang, "CQP / CRF (Constant Quality)", "CQP / CRF (Стала якість)", "CQP / CRF (恒定画质)", "CQP / CRF (Konstante Qualität)", "CQP / CRF (Qualité constante)", "CQP / CRF (Stała jakość)")
-                        };
-                        if (ImGui::Combo(
-                            tr(lang, "Rate Control Mode", "Керування бітрейтом", "码率控制模式", "Bitratensteuerung", "Contrôle du débit", "Kontrola bitrate"),
-                            &state->rate_control, rate_modes, 3)) {
-                            state->action_settings_changed = true;
-                        }
-
-                        if (state->rate_control == 0 || state->rate_control == 1) { // VBR or CBR
-                            int mbps = (int)(state->target_bitrate_kbps / 1000);
-                            if (mbps < 2) mbps = 15;
-                            const char* bitrate_slider_title = (state->rate_control == 1)
-                                ? tr(lang, "Constant Bitrate (Mbps)", "Постійний бітрейт (Мбіт/с)", "固定码率 (Mbps)", "Konstante Bitrate (Mbps)", "Débit constant (Mbps)", "Stały bitrate (Mbps)")
-                                : tr(lang, "Target Bitrate (Mbps)", "Цільовий бітрейт (Мбіт/с)", "目标码率 (Mbps)", "Ziel-Bitrate (Mbps)", "Débit cible (Mbps)", "Docelowy bitrate (Mbps)");
-                            if (ImGui::SliderInt(bitrate_slider_title, &mbps, 2, 80, "%d Mbps")) {
-                                state->target_bitrate_kbps = (uint32_t)(mbps * 1000);
+                        if (state->encoder_choice != 7) {
+                            ImGui::Spacing();
+                            const char* rate_modes[] = {
+                                tr(lang, "VBR (Variable Bitrate - Recommended)", "VBR (Змінний бітрейт - Рекомендовано)", "VBR (动态码率 - 推荐)", "VBR (Variable Bitrate - Empfohlen)", "VBR (Débit variable - Recommandé)", "VBR (Zmienny bitrate - Zalecane)"),
+                                tr(lang, "CBR (Constant Bitrate - Fixed)", "CBR (Постійний бітрейт - Стабільний)", "CBR (固定码率)", "CBR (Konstante Bitrate)", "CBR (Débit constant)", "CBR (Stały bitrate)"),
+                                tr(lang, "CQP / CRF (Constant Quality)", "CQP / CRF (Стала якість)", "CQP / CRF (恒定画质)", "CQP / CRF (Konstante Qualität)", "CQP / CRF (Qualité constante)", "CQP / CRF (Stała jakość)")
+                            };
+                            if (ImGui::Combo(
+                                tr(lang, "Rate Control Mode", "Керування бітрейтом", "码率控制模式", "Bitratensteuerung", "Contrôle du débit", "Kontrola bitrate"),
+                                &state->rate_control, rate_modes, 3)) {
                                 state->action_settings_changed = true;
                             }
 
-                            ImGui::TextDisabled("%s", tr(lang, "  Quick Bitrate Presets:", "  Швидкі пресети бітрейту:", "  快速码率预设:", "  Schnellwahl-Bitrate:", "  Préréglages rapides :", "  Szybkie presety bitrate:"));
-                            ImGui::SameLine();
-                            if (ImGui::SmallButton("6M (720p)")) { state->target_bitrate_kbps = 6000; state->action_settings_changed = true; }
-                            ImGui::SameLine();
-                            if (ImGui::SmallButton("12M (1080p 30fps)")) { state->target_bitrate_kbps = 12000; state->action_settings_changed = true; }
-                            ImGui::SameLine();
-                            if (ImGui::SmallButton("18M (1080p 60fps)")) { state->target_bitrate_kbps = 18000; state->action_settings_changed = true; }
-                            ImGui::SameLine();
-                            if (ImGui::SmallButton("30M (High)")) { state->target_bitrate_kbps = 30000; state->action_settings_changed = true; }
-                        } else { // CQP or CRF
-                            if (state->quality_cqp < 10 || state->quality_cqp > 40) state->quality_cqp = 20;
-                            if (ImGui::SliderInt(
-                                tr(lang, "Quality Level (CQP/CRF: lower = better)", "Коефіцієнт якості (CQP/CRF: менше = краще)", "画质等级 (CQP/CRF: 数值越小画质越高)", "Qualitätsstufe (CQP/CRF: niedriger = besser)", "Niveau de qualité (CQP/CRF : bas = meilleur)", "Poziom jakości (CQP/CRF: mniej = lepiej)"),
-                                &state->quality_cqp, 14, 32)) {
+                            if (state->rate_control == 0 || state->rate_control == 1) {
+                                int mbps = (int)(state->target_bitrate_kbps / 1000);
+                                if (mbps < 2) mbps = 15;
+                                const char* bitrate_slider_title = (state->rate_control == 1)
+                                    ? tr(lang, "Constant Bitrate (Mbps)", "Постійний бітрейт (Мбіт/с)", "固定码率 (Mbps)", "Konstante Bitrate (Mbps)", "Débit constant (Mbps)", "Stały bitrate (Mbps)")
+                                    : tr(lang, "Target Bitrate (Mbps)", "Цільовий бітрейт (Мбіт/с)", "目标码率 (Mbps)", "Ziel-Bitrate (Mbps)", "Débit cible (Mbps)", "Docelowy bitrate (Mbps)");
+                                if (ImGui::SliderInt(bitrate_slider_title, &mbps, 2, 80, "%d Mbps")) {
+                                    state->target_bitrate_kbps = (uint32_t)(mbps * 1000);
+                                    state->action_settings_changed = true;
+                                }
+
+                                ImGui::TextDisabled("%s", tr(lang, "  Quick Bitrate Presets:", "  Швидкі пресети бітрейту:", "  快速码率预设:", "  Schnellwahl-Bitrate:", "  Préréglages rapides :", "  Szybkie presety bitrate:"));
+                                ImGui::SameLine();
+                                if (ImGui::SmallButton("6M (720p)")) { state->target_bitrate_kbps = 6000; state->action_settings_changed = true; }
+                                ImGui::SameLine();
+                                if (ImGui::SmallButton("12M (1080p 30fps)")) { state->target_bitrate_kbps = 12000; state->action_settings_changed = true; }
+                                ImGui::SameLine();
+                                if (ImGui::SmallButton("18M (1080p 60fps)")) { state->target_bitrate_kbps = 18000; state->action_settings_changed = true; }
+                                ImGui::SameLine();
+                                if (ImGui::SmallButton("30M (High)")) { state->target_bitrate_kbps = 30000; state->action_settings_changed = true; }
+                            } else {
+                                if (state->quality_cqp < 10 || state->quality_cqp > 40) state->quality_cqp = 20;
+                                if (ImGui::SliderInt(
+                                    tr(lang, "Quality Level (CQP/CRF: lower = better)", "Коефіцієнт якості (CQP/CRF: менше = краще)", "画质等级 (CQP/CRF: 数值越小画质越高)", "Qualitätsstufe (CQP/CRF: niedriger = besser)", "Niveau de qualité (CQP/CRF : bas = meilleur)", "Poziom jakości (CQP/CRF: mniej = lepiej)"),
+                                    &state->quality_cqp, 14, 32)) {
+                                    state->action_settings_changed = true;
+                                }
+                            }
+
+                            int gop_options[] = { 1, 2, 3, 5 };
+                            const char* gop_labels[] = { "1 s", "2 s (Recommended)", "3 s", "5 s" };
+                            int current_gop_idx = 1;
+                            for (int i = 0; i < 4; i++) {
+                                if (gop_options[i] == state->keyframe_interval_secs) current_gop_idx = i;
+                            }
+                            if (ImGui::Combo(
+                                tr(lang, "Keyframe Interval (GOP)", "Інтервал ключових кадрів (GOP)", "关键帧间隔 (GOP)", "Keyframe-Intervall (GOP)", "Intervalle d'images clés (GOP)", "Interwał klatek kluczowych (GOP)"),
+                                &current_gop_idx, gop_labels, 4)) {
+                                state->keyframe_interval_secs = gop_options[current_gop_idx];
                                 state->action_settings_changed = true;
                             }
                         }
 
-                        // Encoder Preset (Speed vs Quality)
-                        const char* preset_labels[] = {
-                            tr(lang, "Ultrafast (Recommended for games - 0 lag)", "Ultrafast (Надшвидкий - Рекомендовано для ігор)", "Ultrafast (极速 - 游戏录制推荐，零卡顿)", "Ultrafast (Empfohlen für Spiele - 0 Lag)", "Ultrafast (Recommandé pour les jeux - 0 lag)", "Ultrafast (Zalecany do gier - 0 przycięć)"),
-                            tr(lang, "Superfast / Fast (Low load)", "Superfast / Fast (Швидкий)", "Superfast / Fast (快速 - 低负载)", "Superfast / Fast (Geringe Last)", "Superfast / Fast (Faible charge)", "Superfast / Fast (Niskie obciążenie)"),
-                            tr(lang, "Balanced / Medium (Balanced)", "Balanced / Medium (Збалансований)", "Balanced / Medium (均衡)", "Balanced / Medium (Ausgewogen)", "Balanced / Medium (Équilibré)", "Balanced / Medium (Zbalansowany)"),
-                            tr(lang, "Slow (High Quality - Heavy CPU load)", "Slow (Висока якість - Велике навантаження)", "Slow (高画质 - 高 CPU 负载)", "Slow (Hohe Qualität - Hohe CPU-Last)", "Slow (Haute qualité - Charge CPU élevée)", "Slow (Wysoka jakość - Duże obciążenie CPU)")
-                        };
-                        if (ImGui::Combo(
-                            tr(lang, "Encoder Preset", "Профіль швидкодії (Пресет)", "编码预设 (速度与画质)", "Encoder-Preset", "Préréglage de l'encodeur", "Profil szybkości (Preset)"),
-                            &state->encoder_preset, preset_labels, 4)) {
-                            state->action_settings_changed = true;
-                        }
-
-                        // Keyframe / GOP interval
-                        int gop_options[] = { 1, 2, 3, 5 };
-                        const char* gop_labels[] = {
-                            "1 s",
-                            "2 s (Recommended)",
-                            "3 s",
-                            "5 s"
-                        };
-                        int current_gop_idx = 1;
-                        for (int i = 0; i < 4; i++) {
-                            if (gop_options[i] == state->keyframe_interval_secs) current_gop_idx = i;
-                        }
-                        if (ImGui::Combo(
-                            tr(lang, "Keyframe Interval (GOP)", "Інтервал ключових кадрів (GOP)", "关键帧间隔 (GOP)", "Keyframe-Intervall (GOP)", "Intervalle d'images clés (GOP)", "Interwał klatek kluczowych (GOP)"),
-                            &current_gop_idx, gop_labels, 4)) {
-                            state->keyframe_interval_secs = gop_options[current_gop_idx];
-                            state->action_settings_changed = true;
-                        }
-
-                        // Container Format Selection
-                        const char* container_formats[] = {
+const char* container_formats[] = {
                             tr(lang, "MKV (*.mkv - Recommended, crash-resilient)", "MKV (*.mkv - Рекомендовано, стійкий до збоїв)", "MKV (*.mkv - 推荐，防崩溃损坏)", "MKV (*.mkv - Empfohlen, absturzsicher)", "MKV (*.mkv - Recommandé, résistant aux crashs)", "MKV (*.mkv - Zalecany, odporny na awarie)"),
                             tr(lang, "MP4 (*.mp4 - Universal compatibility)", "MP4 (*.mp4 - Сумісний з усіма плеєрами)", "MP4 (*.mp4 - 通用兼容格式)", "MP4 (*.mp4 - Universelle Kompatibilität)", "MP4 (*.mp4 - Compatibilité universelle)", "MP4 (*.mp4 - Uniwersalna kompatybilność)"),
-                            tr(lang, "MOV (*.mov - Video Editing / QuickTime)", "MOV (*.mov - Монтаж у DaVinci / Premiere)", "MOV (*.mov - 适合视频剪辑)", "MOV (*.mov - Videoschnitt / QuickTime)", "MOV (*.mov - Montage vidéo / QuickTime)", "MOV (*.mov - Montaż wideo / QuickTime)")
+tr(lang, "MOV (*.mov - Video Editing / QuickTime)", "MOV (*.mov - Монтаж у DaVinci / Premiere)", "MOV (*.mov - 适合视频剪辑)", "MOV (*.mov - Videoschnitt / QuickTime)", "MOV (*.mov - Montage vidéo / QuickTime)", "MOV (*.mov - Montaż wideo / QuickTime)"),
+                            tr(lang, "WebM (*.webm - Web & Browser streaming)", "WebM (*.webm - Для вебу та браузерів)", "WebM (*.webm - 网页与浏览器流媒体)", "WebM (*.webm - Web- & Browser-Streaming)", "WebM (*.webm - Web et streaming navigateur)", "WebM (*.webm - Format do sieci i przeglądarek)"),
+                            tr(lang, "WMV (*.wmv - Windows Media Video)", "WMV (*.wmv - Класичний Windows Media)", "WMV (*.wmv - Windows 媒体视频)", "WMV (*.wmv - Windows Media Video)", "WMV (*.wmv - Windows Media Video)", "WMV (*.wmv - Format Windows Media)"),
+                            tr(lang, "FLV (*.flv - Flash Video streaming)", "FLV (*.flv - Flash Video стрім)", "FLV (*.flv - Flash 视频流)", "FLV (*.flv - Flash-Video)", "FLV (*.flv - Vidéo Flash)", "FLV (*.flv - Flash Video)"),
+                            tr(lang, "F4V (*.f4v - Flash MP4 video)", "F4V (*.f4v - Flash MP4 формат)", "F4V (*.f4v - Flash MP4 视频)", "F4V (*.f4v - Flash MP4-Video)", "F4V (*.f4v - Vidéo Flash MP4)", "F4V (*.f4v - Flash MP4)"),
+                            tr(lang, "AVCHD (*.m2ts - High-definition camcorder)", "AVCHD (*.m2ts - Відеокамери високої чіткості)", "AVCHD (*.m2ts - 高清摄像机格式)", "AVCHD (*.m2ts - HD-Camcorder-Format)", "AVCHD (*.m2ts - Format caméscope haute définition)", "AVCHD (*.m2ts - Format kamer wysokiej rozdzielczości)")
                         };
                         if (ImGui::Combo(
                             tr(lang, "Container Format", "Формат відеофайлу", "视频容器格式", "Container-Format", "Format du conteneur", "Format pliku wideo"),
-                            &state->container_format, container_formats, 3)) {
+                            &state->container_format, container_formats, 8)) {
                             state->action_settings_changed = true;
                         }
 
@@ -1749,6 +2165,200 @@ void imgui_window_render_ui(UiState* state) {
                         ImGui::Separator();
                         ImGui::Spacing();
 
+                        ImGui::TextColored(ImVec4(0.80f, 0.85f, 0.95f, 1.00f), "%s",
+                            tr(lang,
+                                "Additional Audio Sources:",
+                                "Додаткові джерела аудіо:",
+                                "附加音频源:",
+                                "Zusätzliche Audioquellen:",
+                                "Sources audio supplémentaires :",
+                                "Dodatkowe źródła dźwięku:"));
+
+                        if (ImGui::Checkbox(
+                            tr(lang,
+                                "2nd System Audio Source",
+                                "2-й системний звук",
+                                "第2系统声音",
+                                "2. Systemton-Quelle",
+                                "2e son système",
+                                "2. źródło dźwięku systemowego"),
+                            &state->record_system_audio2)) {
+                            state->action_settings_changed = true;
+                        }
+                        if (state->record_system_audio2) {
+                            if (state->audio_output_count > 0 && state->audio_output_names != NULL) {
+                                if (ImGui::Combo(
+                                    tr(lang,
+                                        "2nd Playback Device",
+                                        "2-й пристрій виводу",
+                                        "第2播放设备",
+                                        "2. Wiedergabegerät",
+                                        "2e périphérique de lecture",
+                                        "2. urządzenie odtwarzania"),
+                                    &state->selected_audio_output2, state->audio_output_names, state->audio_output_count)) {
+                                    state->action_settings_changed = true;
+                                }
+                            }
+                            int sys2_vol_percent = (int)(state->system_volume2 * 100.0f + 0.5f);
+                            if (ImGui::SliderInt(
+                                tr(lang,
+                                    "2nd System Volume (%)",
+                                    "Гучність 2-ї системи (%)",
+                                    "第2系统音量 (%)",
+                                    "2. Systemlautstärke (%)",
+                                    "Volume 2e système (%)",
+                                    "Głośność 2. systemu (%)"),
+                                &sys2_vol_percent, 0, 200, "%d%%")) {
+                                state->system_volume2 = (float)sys2_vol_percent / 100.0f;
+                                state->action_settings_changed = true;
+                            }
+                            ImGui::SameLine();
+                            ImGui::ProgressBar(state->record_system_audio2 ? state->sys_audio_level2 : 0.0f, ImVec2(90, 16), "");
+                        }
+
+                        if (ImGui::Checkbox(
+                            tr(lang,
+                                "2nd Microphone Source",
+                                "2-й мікрофон",
+                                "第2麦克风",
+                                "2. Mikrofon-Quelle",
+                                "2e microphone",
+                                "2. źródło mikrofonu"),
+                            &state->record_microphone2)) {
+                            state->action_settings_changed = true;
+                        }
+                        if (state->record_microphone2) {
+                            if (state->audio_input_count > 0 && state->audio_input_names != NULL) {
+                                if (ImGui::Combo(
+                                    tr(lang,
+                                        "2nd Recording Device",
+                                        "2-й пристрій вводу",
+                                        "第2录音设备",
+                                        "2. Aufnahmegerät",
+                                        "2e périphérique d'entrée",
+                                        "2. urządzenie wejściowe"),
+                                    &state->selected_audio_input2, state->audio_input_names, state->audio_input_count)) {
+                                    state->action_settings_changed = true;
+                                }
+                            }
+                            int mic2_vol_percent = (int)(state->mic_volume2 * 100.0f + 0.5f);
+                            if (ImGui::SliderInt(
+                                tr(lang,
+                                    "2nd Microphone Volume (%)",
+                                    "Гучність 2-го мікрофона (%)",
+                                    "第2麦克风音量 (%)",
+                                    "2. Mikrofonlautstärke (%)",
+                                    "Volume 2e microphone (%)",
+                                    "Głośność 2. mikrofonu (%)"),
+                                &mic2_vol_percent, 0, 200, "%d%%")) {
+                                state->mic_volume2 = (float)mic2_vol_percent / 100.0f;
+                                state->action_settings_changed = true;
+                            }
+                            ImGui::SameLine();
+                            ImGui::ProgressBar(state->record_microphone2 ? state->mic_audio_level2 : 0.0f, ImVec2(90, 16), "");
+                        }
+
+                        ImGui::TextDisabled("%s",
+                            tr(lang,
+                                "  Track 0: Mix | Track 1-4: each source on its own track (when Separate Tracks is on)",
+                                "  Доріжка 0: Змішана | Доріжки 1-4: кожне джерело на своїй доріжці (коли ввімкнено окремі доріжки)",
+                                "  音轨 0: 混音 | 音轨 1-4: 每个源单独音轨 (开启独立音轨时)",
+                                "  Spur 0: Mix | Spur 1-4: jede Quelle auf eigener Spur (bei getrennten Spuren)",
+                                "  Piste 0 : Mix | Pistes 1-4 : chaque source sur sa propre piste (si pistes séparées)",
+                                "  Ścieżka 0: Miks | Ścieżki 1-4: każde źródło na osobnej ścieżce (przy osobnych ścieżkach)"));
+
+                        ImGui::Spacing();
+                        ImGui::Separator();
+                        ImGui::Spacing();
+
+                        ImGui::TextColored(ImVec4(0.80f, 0.85f, 0.95f, 1.00f), "%s",
+                            tr(lang,
+                                "Voice Processing (Microphone):",
+                                "Обробка голосу (мікрофон):",
+                                "语音处理 (麦克风):",
+                                "Sprachverarbeitung (Mikrofon):",
+                                "Traitement de la voix (Microphone) :",
+                                "Przetwarzanie głosu (Mikrofon):"));
+                        ImGui::Spacing();
+
+                        if (ImGui::Checkbox(
+                            tr(lang,
+                                "Noise Suppression",
+                                "Шумозаглушення",
+                                "噪声抑制",
+                                "Rauschunterdrückung",
+                                "Réduction du bruit",
+                                "Redukcja szumu"),
+                            &state->mic_noise_suppression)) {
+                            state->action_settings_changed = true;
+                        }
+                        if (state->mic_noise_suppression) {
+                            int ns_pct = (int)(state->mic_ns_strength * 100.0f + 0.5f);
+                            if (ImGui::SliderInt(
+                                tr(lang,
+                                    "Suppression Strength (%)",
+                                    "Сила шумозаглушення (%)",
+                                    "抑制强度 (%)",
+                                    "Unterdrückungsstärke (%)",
+                                    "Intensité de la réduction (%)",
+                                    "Siła redukcji (%)"),
+                                &ns_pct, 0, 100, "%d%%")) {
+                                state->mic_ns_strength = (float)ns_pct / 100.0f;
+                                state->action_settings_changed = true;
+                            }
+                            ImGui::TextDisabled("%s",
+                                tr(lang,
+                                    "  Removes hum, rumble and constant background noise (high-pass + noise gate).",
+                                    "  Прибирає гул, низькочастотний шум і постійний фоновий шум (HP-фільтр + шумовий гейт).",
+                                    "  消除嗡嗡声、隆隆声和持续背景噪声 (高通滤波器 + 噪声门)。",
+                                    "  Entfernt Brummen, Rumpeln und konstantes Hintergrundrauschen (Hochpass + Noise-Gate).",
+                                    "  Supprime la rumeur, les basses fréquences et le bruit de fond constant (passe-haut + porte de bruit).",
+                                    "  Usuwa brzęczenie, dudnienie i stały szum tła (filtr górnoprzepustowy + bramka szumu)."));
+                        }
+
+                        if (ImGui::Checkbox(
+                            tr(lang,
+                                "Compressor (Levels Out Loud Peaks)",
+                                "Компресор (вирівнює голосні піки)",
+                                "压缩器 (平衡响亮峰值)",
+                                "Kompressor (Gleicht laute Spitzen aus)",
+                                "Compresseur (Égalise les pics sonores)",
+                                "Kompresor (Wyrównuje głośne piki)"),
+                            &state->mic_compressor)) {
+                            state->action_settings_changed = true;
+                        }
+                        if (state->mic_compressor) {
+                            int comp_pct = (int)(state->mic_comp_amount * 100.0f + 0.5f);
+                            if (ImGui::SliderInt(
+                                tr(lang,
+                                    "Compression Amount (%)",
+                                    "Ступінь компресії (%)",
+                                    "压缩量 (%)",
+                                    "Kompressionsgrad (%)",
+                                    "Degré de compression (%)",
+                                    "Stopień kompresji (%)"),
+                                &comp_pct, 0, 100, "%d%%")) {
+                                state->mic_comp_amount = (float)comp_pct / 100.0f;
+                                state->action_settings_changed = true;
+                            }
+                        }
+
+                        {
+                            int gain_db = (int)(state->mic_gain_db + (state->mic_gain_db >= 0 ? 0.5f : -0.5f));
+                            if (ImGui::SliderInt(
+                                tr(lang,
+                                    "Volume Boost (dB)",
+                                    "Підсилення гучності (дБ)",
+                                    "音量增益 (分贝)",
+                                    "Lautstärke-Verstärkung (dB)",
+                                    "Amplification du volume (dB)",
+                                    "Wzmocnienie głośności (dB)"),
+                                &gain_db, -12, 24, "%d dB")) {
+                                state->mic_gain_db = (float)gain_db;
+                                state->action_settings_changed = true;
+                            }
+                        }
+
                         // Separate Tracks
                         if (ImGui::Checkbox(
                             tr(lang,
@@ -1763,12 +2373,12 @@ void imgui_window_render_ui(UiState* state) {
                         }
                         ImGui::TextDisabled("%s",
                             tr(lang,
-                                "  Track 1: System Audio | Track 2: Microphone (Ideal for editing)",
-                                "  Доріжка 1: Системний звук | Доріжка 2: Мікрофон (зручно для монтажу)",
-                                "  音轨 1: 系统声音 | 音轨 2: 麦克风 (方便后期剪辑)",
-                                "  Spur 1: Systemton | Spur 2: Mikrofon (Ideal für Videoschnitt)",
-                                "  Piste 1 : Son système | Piste 2 : Microphone (Idéal pour le montage)",
-                                "  Ścieżka 1: Dźwięk systemu | Ścieżka 2: Mikrofon (Wygodne do montażu)"));
+                                "  Track 0: Mix of all sources | Tracks 1-4: each source on its own track (ideal for editing)",
+                                "  Доріжка 0: мікс усіх джерел | Доріжки 1-4: кожне джерело окремо (зручно для монтажу)",
+                                "  音轨 0: 所有源混音 | 音轨 1-4: 每个源单独音轨 (方便后期剪辑)",
+                                "  Spur 0: Mix aller Quellen | Spuren 1-4: jede Quelle einzeln (Ideal für Videoschnitt)",
+                                "  Piste 0 : Mix de toutes les sources | Pistes 1-4 : chaque source séparément (Idéal pour le montage)",
+                                "  Ścieżka 0: Miks wszystkich źródeł | Ścieżki 1-4: każde źródło osobno (Wygodne do montażu)"));
 
                         ImGui::Spacing();
 
@@ -1792,8 +2402,12 @@ void imgui_window_render_ui(UiState* state) {
                                 "  Erstellt eine unkomprimierte 48-kHz-WAV-Audiodatei neben dem Video.",
                                 "  Crée un fichier WAV 48 kHz non compressé à côté du fichier vidéo.",
                                 "  Tworzy nieskompresowany plik WAV 48 kHz obok pliku wideo."));
+                        ImGui::Spacing();
+                        ImGui::Separator();
+                        ImGui::Spacing();
+                        render_app_audio_mixer_ui(lang);
                     }
-                    ImGui::EndChild();
+                                        ImGui::EndChild();
                     ImGui::PopStyleColor();
                     ImGui::EndTabItem();
                 }
@@ -1921,6 +2535,14 @@ void imgui_window_render_ui(UiState* state) {
     }
 
     ImGui::End();
+
+        if (g_showAppMixerPopup) {
+        ImGui::SetNextWindowSize(ImVec2(520.0f, 340.0f), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin(tr(lang, "Application Audio Mixer", "Мікшер гучності додатків", "应用程序音量混合器", "Anwendungs-Audiomixer", "Mixeur audio des applications", "Mikser audio aplikacji"), &g_showAppMixerPopup)) {
+            render_app_audio_mixer_ui(lang);
+        }
+        ImGui::End();
+    }
 
     bool should_enable_preview = preview_tab_active && !g_previewPaused && !(g_hWnd && IsIconic(g_hWnd));
     if (!should_enable_preview && g_previewEnabled) {

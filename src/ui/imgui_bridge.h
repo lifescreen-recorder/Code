@@ -59,6 +59,30 @@ typedef struct {
     int output_resolution; // 0 = Native/Display, 1 = 1080p, 2 = 720p (Weak PC), 3 = 480p (Ultra Low)
     int color_range;       // 0 = Limited (BT.709 16-235), 1 = Full (0-255)
     char output_dir[260];
+    int encoder_choice;
+    int qsv_preset;
+    bool qsv_low_power;
+    int qsv_async_depth;
+    int intel_msdk_codec;
+    int ffmpeg_hw_engine;
+    int ffmpeg_hw_codec;
+    int ffmpeg_hw_preset;
+    bool ffmpeg_hw_zerolatency;
+    int wmf_codec;
+    int wmf_rate_control;
+    int wmf_scenario;
+    int wmf_quality;
+    bool wmf_hw_encoding;
+    int openh264_profile;
+    int openh264_slices;
+    int openh264_rc_mode;
+    int x264_preset;
+    int x264_tune;
+    int x264_profile;
+    int x264_threads;
+    int mjpeg_quality;
+    int mjpeg_huffman;
+    int mjpeg_color_range;
 
     // Hardware Encoder Capabilities Mask
     uint32_t encoder_caps_mask;
@@ -90,6 +114,23 @@ typedef struct {
     bool action_language_changed;
     bool action_open_folder_requested;
     bool action_settings_changed;
+
+    bool low_end_mode;
+
+    bool record_system_audio2;
+    int selected_audio_output2;
+    float system_volume2;
+    bool record_microphone2;
+    int selected_audio_input2;
+    float mic_volume2;
+    float sys_audio_level2;
+    float mic_audio_level2;
+
+    bool mic_noise_suppression;
+    float mic_ns_strength;
+    bool mic_compressor;
+    float mic_comp_amount;
+    float mic_gain_db;
 } UiState;
 
 // Native Win32 Window & DX11 LifeCycle

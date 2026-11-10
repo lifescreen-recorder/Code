@@ -180,6 +180,11 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
         .mkv => 0,
         .mp4 => 1,
         .mov => 2,
+        .webm => 3,
+        .wmv => 4,
+        .flv => 5,
+        .f4v => 6,
+        .avchd => 7,
     };
     ui_state.rate_control = switch (cfg.encoder.rate_control) {
         .vbr => 0,
@@ -202,25 +207,55 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
     if (caps.qsv_av1)    encoder_mask |= (1 << 8);
     if (caps.sw_x264)    encoder_mask |= (1 << 9);
     if (caps.sw_x265)    encoder_mask |= (1 << 10);
+    if (caps.wmf_h264)   encoder_mask |= (1 << 11);
+    if (caps.wmf_hevc)   encoder_mask |= (1 << 12);
+    if (caps.mjpeg)      encoder_mask |= (1 << 13);
+    if (caps.openh264)   encoder_mask |= (1 << 14);
     ui_state.encoder_caps_mask = encoder_mask;
 
-    // Default encoder based on detected capabilities
-    if (caps.nvenc_h264) {
-        ui_state.encoder_backend = 0; // NVENC
+    if (caps.qsv_h264) {
+        ui_state.encoder_choice = 0;
+        ui_state.encoder_backend = 2;
+    } else if (caps.nvenc_h264) {
+        ui_state.encoder_choice = 3;
+        ui_state.encoder_backend = 0;
     } else if (caps.amf_h264) {
-        ui_state.encoder_backend = 1; // AMF
-    } else if (caps.qsv_h264) {
-        ui_state.encoder_backend = 2; // QSV
+        ui_state.encoder_choice = 3;
+        ui_state.encoder_backend = 1;
+    } else if (caps.wmf_h264) {
+        ui_state.encoder_choice = 4;
+        ui_state.encoder_backend = 3;
     } else {
-        ui_state.encoder_backend = 3; // Software
+        ui_state.encoder_choice = 6;
+        ui_state.encoder_backend = 3;
     }
 
-    recorder_pipeline.cfg.encoder.preferred_backend = switch (ui_state.encoder_backend) {
-        0 => .nvenc,
-        1 => .amf,
-        2 => .qsv,
-        else => .software,
+    recorder_pipeline.cfg.encoder.preferred_backend = switch (ui_state.encoder_choice) {
+        0 => .qsv,
+        1 => .qsv,
+        2 => .intel_msdk,
+        3 => switch (ui_state.encoder_backend) { 0 => .nvenc, 1 => .amf, else => .auto },
+        4 => .wmf,
+        5 => .openh264,
+        6 => .software,
+        7 => .software,
+        else => .auto,
     };
+    if (ui_state.encoder_choice == 7) {
+        recorder_pipeline.cfg.encoder.codec = .mjpeg;
+    }
+    recorder_pipeline.cfg.encoder.qsv_low_power = ui_state.qsv_low_power;
+    recorder_pipeline.cfg.encoder.qsv_async_depth = @intCast(ui_state.qsv_async_depth);
+    recorder_pipeline.cfg.encoder.wmf_scenario = @intCast(ui_state.wmf_scenario);
+    recorder_pipeline.cfg.encoder.wmf_rate_control = @intCast(ui_state.wmf_rate_control);
+    recorder_pipeline.cfg.encoder.wmf_quality = @intCast(ui_state.wmf_quality);
+    recorder_pipeline.cfg.encoder.wmf_hw_encoding = ui_state.wmf_hw_encoding;
+    recorder_pipeline.cfg.encoder.x264_tune = @intCast(ui_state.x264_tune);
+    recorder_pipeline.cfg.encoder.x264_profile = @intCast(ui_state.x264_profile);
+    recorder_pipeline.cfg.encoder.x264_threads = @intCast(ui_state.x264_threads);
+    recorder_pipeline.cfg.encoder.openh264_slices = @intCast(ui_state.openh264_slices);
+    recorder_pipeline.cfg.encoder.mjpeg_qscale = @intCast(ui_state.mjpeg_quality);
+    recorder_pipeline.cfg.encoder.mjpeg_huffman = @intCast(ui_state.mjpeg_huffman);
 
     ui_state.show_overlay_indicator = true;
     ui_state.hotkey_start_stop_preset = 0; // F9
@@ -230,6 +265,19 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
     ui_state.mic_volume = cfg.audio.mic_volume;
     ui_state.separate_audio_tracks = cfg.audio.separate_tracks;
     ui_state.save_separate_audio_file = cfg.audio.save_separate_audio_file;
+
+    ui_state.low_end_mode = cfg.video.low_end_mode;
+    ui_state.record_system_audio2 = cfg.audio.system_audio2_enabled;
+    ui_state.selected_audio_output2 = @intCast(cfg.audio.selected_audio_output2);
+    ui_state.system_volume2 = cfg.audio.system_audio2_volume;
+    ui_state.record_microphone2 = cfg.audio.mic2_enabled;
+    ui_state.selected_audio_input2 = @intCast(cfg.audio.selected_audio_input2);
+    ui_state.mic_volume2 = cfg.audio.mic2_volume;
+    ui_state.mic_noise_suppression = cfg.audio.mic_noise_suppression;
+    ui_state.mic_ns_strength = cfg.audio.mic_ns_strength;
+    ui_state.mic_compressor = cfg.audio.mic_compressor;
+    ui_state.mic_comp_amount = cfg.audio.mic_comp_amount;
+    ui_state.mic_gain_db = cfg.audio.mic_gain_db;
 
     ui_state.output_resolution = if (cfg.video.resolution_width == 1920 and cfg.video.resolution_height == 1080)
         1
@@ -313,7 +361,7 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
         }
 
         // Idle Screen Preview Update (30 FPS when not recording)
-        if (!recorder_pipeline.is_running.load(.monotonic) and app_window.imgui_is_preview_enabled()) {
+        if (!recorder_pipeline.is_running.load(.monotonic) and !ui_state.low_end_mode and app_window.imgui_is_preview_enabled()) {
             if (now_ms - last_preview_ms >= 33) {
                 last_preview_ms = now_ms;
 
@@ -379,18 +427,53 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
         // Handle Settings changes
         if (ui_state.action_settings_changed) {
             ui_state.action_settings_changed = false;
-            recorder_pipeline.cfg.encoder.preferred_backend = switch (ui_state.encoder_backend) {
-                0 => .nvenc,
-                1 => .amf,
-                2 => .qsv,
-                else => .software,
+            recorder_pipeline.cfg.encoder.preferred_backend = switch (ui_state.encoder_choice) {
+                0 => .qsv,
+                1 => .qsv,
+                2 => .intel_msdk,
+                3 => switch (ui_state.encoder_backend) { 0 => .nvenc, 1 => .amf, else => .auto },
+                4 => .wmf,
+                5 => .openh264,
+                6 => .software,
+                7 => .software,
+                else => .auto,
             };
-            recorder_pipeline.cfg.encoder.codec = switch (ui_state.video_codec) {
-                0 => .h264,
-                1 => .hevc,
-                2 => .av1,
-                else => .h264,
-            };
+            if (ui_state.encoder_choice == 7) {
+                recorder_pipeline.cfg.encoder.codec = .mjpeg;
+            } else if (ui_state.encoder_choice == 2) {
+                recorder_pipeline.cfg.encoder.codec = switch (ui_state.intel_msdk_codec) {
+                    1 => .hevc,
+                    2 => .mjpeg,
+                    else => .h264,
+                };
+            } else if (ui_state.encoder_choice == 4) {
+                recorder_pipeline.cfg.encoder.codec = switch (ui_state.wmf_codec) {
+                    1 => .hevc,
+                    else => .h264,
+                };
+            } else if (ui_state.encoder_choice == 3) {
+                recorder_pipeline.cfg.encoder.codec = switch (ui_state.ffmpeg_hw_codec) {
+                    1 => .hevc,
+                    2 => .av1,
+                    else => .h264,
+                };
+            } else if (ui_state.encoder_choice == 1) {
+                recorder_pipeline.cfg.encoder.codec = .hevc;
+            } else {
+                recorder_pipeline.cfg.encoder.codec = .h264;
+            }
+            recorder_pipeline.cfg.encoder.qsv_low_power = ui_state.qsv_low_power;
+            recorder_pipeline.cfg.encoder.qsv_async_depth = @intCast(ui_state.qsv_async_depth);
+            recorder_pipeline.cfg.encoder.wmf_scenario = @intCast(ui_state.wmf_scenario);
+            recorder_pipeline.cfg.encoder.wmf_rate_control = @intCast(ui_state.wmf_rate_control);
+            recorder_pipeline.cfg.encoder.wmf_quality = @intCast(ui_state.wmf_quality);
+            recorder_pipeline.cfg.encoder.wmf_hw_encoding = ui_state.wmf_hw_encoding;
+            recorder_pipeline.cfg.encoder.x264_tune = @intCast(ui_state.x264_tune);
+            recorder_pipeline.cfg.encoder.x264_profile = @intCast(ui_state.x264_profile);
+            recorder_pipeline.cfg.encoder.x264_threads = @intCast(ui_state.x264_threads);
+            recorder_pipeline.cfg.encoder.openh264_slices = @intCast(ui_state.openh264_slices);
+            recorder_pipeline.cfg.encoder.mjpeg_qscale = @intCast(ui_state.mjpeg_quality);
+            recorder_pipeline.cfg.encoder.mjpeg_huffman = @intCast(ui_state.mjpeg_huffman);
             recorder_pipeline.cfg.encoder.rate_control = switch (ui_state.rate_control) {
                 0 => .vbr,
                 1 => .cbr,
@@ -441,9 +524,26 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
             recorder_pipeline.cfg.audio.save_separate_audio_file = ui_state.save_separate_audio_file;
             recorder_pipeline.cfg.audio.selected_audio_output = @intCast(ui_state.selected_audio_output);
             recorder_pipeline.cfg.audio.selected_audio_input = @intCast(ui_state.selected_audio_input);
+            recorder_pipeline.cfg.video.low_end_mode = ui_state.low_end_mode;
+            recorder_pipeline.cfg.audio.system_audio2_enabled = ui_state.record_system_audio2;
+            recorder_pipeline.cfg.audio.selected_audio_output2 = @intCast(ui_state.selected_audio_output2);
+            recorder_pipeline.cfg.audio.system_audio2_volume = ui_state.system_volume2;
+            recorder_pipeline.cfg.audio.mic2_enabled = ui_state.record_microphone2;
+            recorder_pipeline.cfg.audio.selected_audio_input2 = @intCast(ui_state.selected_audio_input2);
+            recorder_pipeline.cfg.audio.mic2_volume = ui_state.mic_volume2;
+            recorder_pipeline.cfg.audio.mic_noise_suppression = ui_state.mic_noise_suppression;
+            recorder_pipeline.cfg.audio.mic_ns_strength = ui_state.mic_ns_strength;
+            recorder_pipeline.cfg.audio.mic_compressor = ui_state.mic_compressor;
+            recorder_pipeline.cfg.audio.mic_comp_amount = ui_state.mic_comp_amount;
+            recorder_pipeline.cfg.audio.mic_gain_db = ui_state.mic_gain_db;
             recorder_pipeline.cfg.encoder.container = switch (ui_state.container_format) {
                 1 => .mp4,
                 2 => .mov,
+                3 => .webm,
+                4 => .wmv,
+                5 => .flv,
+                6 => .f4v,
+                7 => .avchd,
                 else => .mkv,
             };
         }
@@ -501,9 +601,26 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
                 recorder_pipeline.cfg.audio.save_separate_audio_file = ui_state.save_separate_audio_file;
                 recorder_pipeline.cfg.audio.selected_audio_output = @intCast(ui_state.selected_audio_output);
                 recorder_pipeline.cfg.audio.selected_audio_input = @intCast(ui_state.selected_audio_input);
+                recorder_pipeline.cfg.video.low_end_mode = ui_state.low_end_mode;
+                recorder_pipeline.cfg.audio.system_audio2_enabled = ui_state.record_system_audio2;
+                recorder_pipeline.cfg.audio.selected_audio_output2 = @intCast(ui_state.selected_audio_output2);
+                recorder_pipeline.cfg.audio.system_audio2_volume = ui_state.system_volume2;
+                recorder_pipeline.cfg.audio.mic2_enabled = ui_state.record_microphone2;
+                recorder_pipeline.cfg.audio.selected_audio_input2 = @intCast(ui_state.selected_audio_input2);
+                recorder_pipeline.cfg.audio.mic2_volume = ui_state.mic_volume2;
+                recorder_pipeline.cfg.audio.mic_noise_suppression = ui_state.mic_noise_suppression;
+                recorder_pipeline.cfg.audio.mic_ns_strength = ui_state.mic_ns_strength;
+                recorder_pipeline.cfg.audio.mic_compressor = ui_state.mic_compressor;
+                recorder_pipeline.cfg.audio.mic_comp_amount = ui_state.mic_comp_amount;
+                recorder_pipeline.cfg.audio.mic_gain_db = ui_state.mic_gain_db;
                 recorder_pipeline.cfg.encoder.container = switch (ui_state.container_format) {
                     1 => .mp4,
                     2 => .mov,
+                    3 => .webm,
+                    4 => .wmv,
+                    5 => .flv,
+                    6 => .f4v,
+                    7 => .avchd,
                     else => .mkv,
                 };
 
@@ -541,6 +658,11 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
                 const ext = switch (ui_state.container_format) {
                     1 => "mp4",
                     2 => "mov",
+                    3 => "webm",
+                    4 => "wmv",
+                    5 => "flv",
+                    6 => "f4v",
+                    7 => "m2ts",
                     else => "mkv",
                 };
 
@@ -640,6 +762,26 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
             }
         }
         ui_state.mic_audio_level = @min(1.0, mic_peak * ui_state.mic_volume);
+
+        var sys2_peak: f32 = 0.0;
+        if (ui_state.record_system_audio2) {
+            if (snap.state == .recording) {
+                sys2_peak = snap.audio_peak_system;
+            } else {
+                sys2_peak = wasapi.getDevicePeak(0, @intCast(ui_state.selected_audio_output2));
+            }
+        }
+        ui_state.sys_audio_level2 = @min(1.0, sys2_peak * ui_state.system_volume2);
+
+        var mic2_peak: f32 = 0.0;
+        if (ui_state.record_microphone2) {
+            if (snap.state == .recording) {
+                mic2_peak = snap.audio_peak_mic;
+            } else {
+                mic2_peak = wasapi.getDevicePeak(1, @intCast(ui_state.selected_audio_input2));
+            }
+        }
+        ui_state.mic_audio_level2 = @min(1.0, mic2_peak * ui_state.mic_volume2);
 
         // Render Frame
         window.beginFrame();

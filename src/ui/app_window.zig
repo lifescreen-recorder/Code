@@ -46,6 +46,30 @@ pub const UiState = extern struct {
     output_resolution: c_int = 0, // 0 = Native/Display, 1 = 1080p, 2 = 720p, 3 = 480p
     color_range: c_int = 0, // 0 = Limited (BT.709 16-235), 1 = Full (0-255)
     output_dir: [260]u8 = std.mem.zeroes([260]u8),
+    encoder_choice: c_int = 0,
+    qsv_preset: c_int = 0,
+    qsv_low_power: bool = true,
+    qsv_async_depth: c_int = 1,
+    intel_msdk_codec: c_int = 0,
+    ffmpeg_hw_engine: c_int = 0,
+    ffmpeg_hw_codec: c_int = 0,
+    ffmpeg_hw_preset: c_int = 2,
+    ffmpeg_hw_zerolatency: bool = true,
+    wmf_codec: c_int = 0,
+    wmf_rate_control: c_int = 2,
+    wmf_scenario: c_int = 1,
+    wmf_quality: c_int = 70,
+    wmf_hw_encoding: bool = true,
+    openh264_profile: c_int = 0,
+    openh264_slices: c_int = 1,
+    openh264_rc_mode: c_int = 0,
+    x264_preset: c_int = 0,
+    x264_tune: c_int = 0,
+    x264_profile: c_int = 0,
+    x264_threads: c_int = 0,
+    mjpeg_quality: c_int = 3,
+    mjpeg_huffman: c_int = 1,
+    mjpeg_color_range: c_int = 0,
 
     encoder_caps_mask: u32 = 0,
     show_overlay_indicator: bool = true,
@@ -69,6 +93,23 @@ pub const UiState = extern struct {
     action_language_changed: bool = false,
     action_open_folder_requested: bool = false,
     action_settings_changed: bool = false,
+
+    low_end_mode: bool = false,
+
+    record_system_audio2: bool = false,
+    selected_audio_output2: c_int = 0,
+    system_volume2: f32 = 1.0,
+    record_microphone2: bool = false,
+    selected_audio_input2: c_int = 0,
+    mic_volume2: f32 = 1.0,
+    sys_audio_level2: f32 = 0.0,
+    mic_audio_level2: f32 = 0.0,
+
+    mic_noise_suppression: bool = false,
+    mic_ns_strength: f32 = 0.5,
+    mic_compressor: bool = false,
+    mic_comp_amount: f32 = 0.5,
+    mic_gain_db: f32 = 0.0,
 };
 
 extern fn imgui_window_create(width: c_int, height: c_int, title: [*:0]const u8) callconv(.c) bool;

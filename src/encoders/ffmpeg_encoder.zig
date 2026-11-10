@@ -30,6 +30,19 @@ pub const VideoEncoderConfig = extern struct {
     src_height: u32 = 0,
     color_range: u32 = 0,
     capture_cursor: bool = true,
+    qsv_low_power: u32 = 1,
+    qsv_async_depth: u32 = 1,
+    wmf_scenario: u32 = 1,
+    wmf_rate_control: u32 = 2,
+    wmf_quality: u32 = 70,
+    wmf_hw_encoding: u32 = 1,
+    x264_tune: u32 = 0,
+    x264_profile: u32 = 0,
+    x264_threads: u32 = 0,
+    openh264_slices: u32 = 1,
+    mjpeg_qscale: u32 = 3,
+    mjpeg_huffman: u32 = 1,
+    low_end_mode: u32 = 0,
 };
 
 extern "c" fn ffmpeg_bridge_probe_encoders() callconv(.c) u32;
@@ -52,6 +65,10 @@ pub const EncoderCapabilities = struct {
     qsv_av1: bool,
     sw_x264: bool,
     sw_x265: bool,
+    wmf_h264: bool,
+    wmf_hevc: bool,
+    mjpeg: bool,
+    openh264: bool,
 
     pub fn probe() EncoderCapabilities {
         const caps = ffmpeg_bridge_probe_encoders();
@@ -67,6 +84,10 @@ pub const EncoderCapabilities = struct {
             .qsv_av1 = (caps & (1 << 8)) != 0,
             .sw_x264 = (caps & (1 << 9)) != 0,
             .sw_x265 = (caps & (1 << 10)) != 0,
+            .wmf_h264 = (caps & (1 << 11)) != 0,
+            .wmf_hevc = (caps & (1 << 12)) != 0,
+            .mjpeg = (caps & (1 << 13)) != 0,
+            .openh264 = (caps & (1 << 14)) != 0,
         };
     }
 };
@@ -89,6 +110,7 @@ pub const FfmpegEncoder = struct {
             .h264 => 0,
             .hevc => 1,
             .av1 => 2,
+            .mjpeg => 3,
         };
 
         const backend_int: c_int = switch (cfg.encoder.preferred_backend) {
@@ -97,6 +119,9 @@ pub const FfmpegEncoder = struct {
             .amf => 2,
             .qsv => 3,
             .software => 4,
+            .wmf => 5,
+            .openh264 => 6,
+            .intel_msdk => 7,
         };
 
         const rc_int: c_int = switch (cfg.encoder.rate_control) {
@@ -142,6 +167,19 @@ pub const FfmpegEncoder = struct {
             .src_height = src_height,
             .color_range = color_range_int,
             .capture_cursor = cfg.video.capture_cursor,
+            .qsv_low_power = if (cfg.encoder.qsv_low_power) 1 else 0,
+            .qsv_async_depth = cfg.encoder.qsv_async_depth,
+            .wmf_scenario = cfg.encoder.wmf_scenario,
+            .wmf_rate_control = cfg.encoder.wmf_rate_control,
+            .wmf_quality = cfg.encoder.wmf_quality,
+            .wmf_hw_encoding = if (cfg.encoder.wmf_hw_encoding) 1 else 0,
+            .x264_tune = cfg.encoder.x264_tune,
+            .x264_profile = cfg.encoder.x264_profile,
+            .x264_threads = cfg.encoder.x264_threads,
+            .openh264_slices = cfg.encoder.openh264_slices,
+            .mjpeg_qscale = cfg.encoder.mjpeg_qscale,
+            .mjpeg_huffman = cfg.encoder.mjpeg_huffman,
+            .low_end_mode = if (cfg.video.low_end_mode) 1 else 0,
         };
 
         const handle = ffmpeg_encoder_create(&c_cfg, callback, user_data);

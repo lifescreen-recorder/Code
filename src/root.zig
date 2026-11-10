@@ -7,6 +7,7 @@ pub const stats = @import("core/stats.zig");
 pub const command = @import("core/command.zig");
 pub const ring_buffer = @import("core/ring_buffer.zig");
 pub const clock = @import("core/clock.zig");
+pub const audio_dsp = @import("core/audio_dsp.zig");
 pub const pipeline = @import("core/pipeline.zig");
 
 pub const config = @import("config/config.zig");
@@ -78,6 +79,7 @@ pub const std_options: std.Options = .{
 test {
     _ = ring_buffer;
     _ = clock;
+    _ = audio_dsp;
     _ = paths;
     _ = i18n;
     _ = validation;

@@ -58,31 +58,37 @@ struct VideoEncoderContext {
     bool capture_cursor;
 };
 
+typedef struct AudioTrackState {
+    AVStream *stream;
+    AVCodecContext *codec_ctx;
+    AVFrame *frame;
+    AVPacket *packet;
+    AVAudioFifo *fifo;
+    int64_t next_pts;
+    const char *title;
+} AudioTrackState;
+
 struct MuxerContext {
     AVFormatContext *fmt_ctx;
     AVStream *video_stream;
     AVPacket *video_packet;
     SRWLOCK lock;
 
-    AVStream *audio_stream;     // Track 1: System Audio
-    AVCodecContext *audio_codec_ctx;
-    AVFrame *audio_frame;
-    AVPacket *audio_packet;
-    AVAudioFifo *audio_fifo;
-    int64_t next_audio_pts;
-
-    AVStream *audio_stream_mic; // Track 2: Microphone Audio
-    AVCodecContext *audio_codec_ctx_mic;
-    AVFrame *audio_frame_mic;
-    AVPacket *audio_packet_mic;
-    AVAudioFifo *audio_fifo_mic;
-    int64_t next_audio_pts_mic;
+    AudioTrackState audio_tracks[MAX_AUDIO_TRACKS];
+    int audio_track_count;
 
     SwrContext *swr_ctx;
     uint32_t sample_rate;
     uint32_t channels;
     AVRational encoder_time_base;
     uint32_t fps;
+};
+
+static const char *g_individual_track_titles[4] = {
+    "System Audio 1",
+    "System Audio 2",
+    "Microphone 1",
+    "Microphone 2",
 };
 
 static int test_hardware_encoder(const char* name) {
@@ -134,6 +140,10 @@ uint32_t ffmpeg_bridge_probe_encoders(void) {
 
     if (avcodec_find_encoder_by_name("libx264"))    caps |= ENCODER_CAP_SW_X264;
     if (avcodec_find_encoder_by_name("libx265"))    caps |= ENCODER_CAP_SW_X265;
+    if (test_hardware_encoder("h264_mf"))           caps |= ENCODER_CAP_WMF_H264;
+    if (test_hardware_encoder("hevc_mf"))           caps |= ENCODER_CAP_WMF_HEVC;
+    if (avcodec_find_encoder_by_name("mjpeg"))      caps |= ENCODER_CAP_MJPEG;
+    if (avcodec_find_encoder_by_name("libopenh264")) caps |= ENCODER_CAP_OPENH264;
     s_cached_caps = caps;
     s_probed = 1;
 
@@ -141,6 +151,41 @@ uint32_t ffmpeg_bridge_probe_encoders(void) {
 }
 
 static const char* select_encoder_name(BridgeCodecType codec, BridgeBackendType backend, int *is_hw) {
+    if (codec == CODEC_MJPEG) {
+        *is_hw = 0;
+        if (backend == BACKEND_QSV && test_hardware_encoder("mjpeg_qsv")) {
+            *is_hw = 1;
+            return "mjpeg_qsv";
+        }
+        return "mjpeg";
+    }
+
+    if (backend == BACKEND_WMF) {
+        *is_hw = 1;
+        if (codec == CODEC_HEVC && test_hardware_encoder("hevc_mf")) return "hevc_mf";
+        if (codec == CODEC_AV1  && test_hardware_encoder("av1_mf"))  return "av1_mf";
+        if (test_hardware_encoder("h264_mf")) return "h264_mf";
+        *is_hw = 0;
+        return "libx264";
+    }
+
+    if (backend == BACKEND_OPENH264) {
+        *is_hw = 0;
+        if (avcodec_find_encoder_by_name("libopenh264")) return "libopenh264";
+        return "libx264";
+    }
+
+    if (backend == BACKEND_INTEL_MSDK) {
+        *is_hw = 1;
+        if (codec == CODEC_HEVC && test_hardware_encoder("hevc_qsv")) return "hevc_qsv";
+        if (codec == CODEC_MJPEG && test_hardware_encoder("mjpeg_qsv")) return "mjpeg_qsv";
+        if (codec == CODEC_MJPEG) { *is_hw = 0; return "mjpeg"; }
+        if (test_hardware_encoder("h264_qsv")) return "h264_qsv";
+        if (test_hardware_encoder("h264_mf")) return "h264_mf";
+        *is_hw = 0;
+        return "libx264";
+    }
+
     if (backend == BACKEND_SOFTWARE) {
         *is_hw = 0;
         if (codec == CODEC_HEVC && avcodec_find_encoder_by_name("libx265")) return "libx265";
@@ -184,6 +229,9 @@ static const char* select_encoder_name(BridgeCodecType codec, BridgeBackendType 
         if (codec == CODEC_H264 && test_hardware_encoder("h264_amf"))   { *is_hw = 1; return "h264_amf"; }
         if (codec == CODEC_HEVC && test_hardware_encoder("hevc_amf"))   { *is_hw = 1; return "hevc_amf"; }
         if (codec == CODEC_AV1  && test_hardware_encoder("av1_amf"))    { *is_hw = 1; return "av1_amf"; }
+
+        if (codec == CODEC_H264 && test_hardware_encoder("h264_mf"))    { *is_hw = 1; return "h264_mf"; }
+        if (codec == CODEC_HEVC && test_hardware_encoder("hevc_mf"))    { *is_hw = 1; return "hevc_mf"; }
     }
 
     // Software fallback if no GPU encoder is supported
@@ -235,8 +283,13 @@ VideoEncoderContext* ffmpeg_encoder_create(const VideoEncoderConfig *cfg, Packet
     ctx->codec_ctx->color_primaries = AVCOL_PRI_BT709;
     ctx->codec_ctx->color_trc = AVCOL_TRC_BT709;
 
-    if (strstr(encoder_name, "qsv")) {
-        // Intel QuickSync Hardware Video Encoder (runs on Intel GPU ASIC)
+    if (strstr(encoder_name, "mf")) {
+        ctx->codec_ctx->pix_fmt = AV_PIX_FMT_NV12;
+        ctx->is_hardware = 0;
+    } else if (strstr(encoder_name, "mjpeg")) {
+        ctx->codec_ctx->pix_fmt = (cfg->color_range == 1) ? AV_PIX_FMT_YUVJ420P : AV_PIX_FMT_YUV420P;
+        ctx->is_hardware = 0;
+    } else if (strstr(encoder_name, "qsv")) {
         ctx->codec_ctx->pix_fmt = AV_PIX_FMT_NV12;
         int qsv_res = av_hwdevice_ctx_create(&ctx->hw_device_ref, AV_HWDEVICE_TYPE_QSV, NULL, NULL, 0);
         if (qsv_res >= 0 && ctx->hw_device_ref) {
@@ -328,28 +381,78 @@ VideoEncoderContext* ffmpeg_encoder_create(const VideoEncoderConfig *cfg, Packet
 
     av_opt_set(ctx->codec_ctx->priv_data, "preset", preset_val, 0);
 
-    if (strstr(encoder_name, "nvenc")) {
+    if (strstr(encoder_name, "mf")) {
+        av_opt_set(ctx->codec_ctx->priv_data, "hw_encoding", cfg->wmf_hw_encoding ? "1" : "0", 0);
+        const char *wmf_rc = "u_vbr";
+        if (cfg->wmf_rate_control == 0) wmf_rc = "cbr";
+        else if (cfg->wmf_rate_control == 1) wmf_rc = "pc_vbr";
+        else if (cfg->wmf_rate_control == 3) wmf_rc = "quality";
+        else if (cfg->wmf_rate_control == 4) wmf_rc = "ld_vbr";
+        av_opt_set(ctx->codec_ctx->priv_data, "rate_control", wmf_rc, 0);
+
+        const char *wmf_sc = "display_remoting";
+        if (cfg->wmf_scenario == 1) wmf_sc = "live_streaming";
+        else if (cfg->wmf_scenario == 2) wmf_sc = "camera_record";
+        else if (cfg->wmf_scenario == 3) wmf_sc = "archive";
+        av_opt_set(ctx->codec_ctx->priv_data, "scenario", wmf_sc, 0);
+
+        char wmf_q[16];
+        snprintf(wmf_q, sizeof(wmf_q), "%u", cfg->wmf_quality ? cfg->wmf_quality : 70);
+        av_opt_set(ctx->codec_ctx->priv_data, "quality", wmf_q, 0);
+    } else if (strstr(encoder_name, "mjpeg")) {
+        ctx->codec_ctx->flags |= AV_CODEC_FLAG_QSCALE;
+        int q = cfg->mjpeg_qscale ? (int)cfg->mjpeg_qscale : 3;
+        if (q < 1) q = 1;
+        if (q > 31) q = 31;
+        ctx->codec_ctx->global_quality = q * FF_QP2LAMBDA;
+        av_opt_set(ctx->codec_ctx->priv_data, "huffman", cfg->mjpeg_huffman ? "optimal" : "default", 0);
+    } else if (strstr(encoder_name, "nvenc")) {
         av_opt_set(ctx->codec_ctx->priv_data, "tune", "ull", 0);
         av_opt_set(ctx->codec_ctx->priv_data, "zerolatency", "1", 0);
     } else if (strstr(encoder_name, "qsv")) {
-        av_opt_set(ctx->codec_ctx->priv_data, "preset", "veryfast", 0);
-        av_opt_set(ctx->codec_ctx->priv_data, "low_power", "1", 0);
-        av_opt_set(ctx->codec_ctx->priv_data, "async_depth", "1", 0);
+        av_opt_set(ctx->codec_ctx->priv_data, "preset", cfg->low_end_mode ? "medium" : preset_val, 0);
+        av_opt_set(ctx->codec_ctx->priv_data, "low_power", (cfg->qsv_low_power || cfg->low_end_mode) ? "1" : "0", 0);
+        char depth_buf[8];
+        snprintf(depth_buf, sizeof(depth_buf), "%u", cfg->low_end_mode ? 1 : (cfg->qsv_async_depth ? cfg->qsv_async_depth : 1));
+        av_opt_set(ctx->codec_ctx->priv_data, "async_depth", depth_buf, 0);
         av_opt_set(ctx->codec_ctx->priv_data, "look_ahead", "0", 0);
         av_opt_set(ctx->codec_ctx->priv_data, "forced_idr", "1", 0);
+    } else if (strstr(encoder_name, "openh264")) {
+        av_opt_set(ctx->codec_ctx->priv_data, "profile", "baseline", 0);
+        char sl_str[8];
+        snprintf(sl_str, sizeof(sl_str), "%u", cfg->openh264_slices ? cfg->openh264_slices : 1);
+        av_opt_set(ctx->codec_ctx->priv_data, "slice_mode", "fixed", 0);
+        av_opt_set(ctx->codec_ctx->priv_data, "slices", sl_str, 0);
     } else if (!is_hw) {
         SYSTEM_INFO sysinfo;
         GetSystemInfo(&sysinfo);
         int cpu_threads = (int)sysinfo.dwNumberOfProcessors;
-        int enc_threads = (cpu_threads > 4) ? 4 : (cpu_threads > 2 ? cpu_threads - 1 : 2);
+        int enc_threads = cfg->x264_threads ? (int)cfg->x264_threads : ((cpu_threads > 4) ? 4 : (cpu_threads > 2 ? cpu_threads - 1 : 2));
         ctx->codec_ctx->thread_count = enc_threads;
         ctx->codec_ctx->thread_type = FF_THREAD_SLICE;
-        av_opt_set(ctx->codec_ctx->priv_data, "tune", "zerolatency", 0);
+        const char *x_tune = "zerolatency";
+        if (cfg->x264_tune == 1) x_tune = "film";
+        else if (cfg->x264_tune == 2) x_tune = "animation";
+        av_opt_set(ctx->codec_ctx->priv_data, "tune", x_tune, 0);
+
+        const char *x_prof = "high";
+        if (cfg->x264_profile == 1) x_prof = "main";
+        else if (cfg->x264_profile == 2) x_prof = "baseline";
+        av_opt_set(ctx->codec_ctx->priv_data, "profile", x_prof, 0);
+
         av_opt_set(ctx->codec_ctx->priv_data, "colorprim", "bt709", 0);
         av_opt_set(ctx->codec_ctx->priv_data, "transfer", "bt709", 0);
         av_opt_set(ctx->codec_ctx->priv_data, "colmatrix", "bt709", 0);
         av_opt_set(ctx->codec_ctx->priv_data, "fullrange", (cfg->color_range == 1) ? "on" : "off", 0);
-        av_opt_set(ctx->codec_ctx->priv_data, "x264-params", "ref=1:no-mbtree=1:rc-lookahead=0:sync-lookahead=0:b-adapt=0:aq-mode=0:subme=1:me=dia:trellis=0", 0);
+        if (cfg->backend == BACKEND_OPENH264) {
+            av_opt_set(ctx->codec_ctx->priv_data, "profile", "baseline", 0);
+            av_opt_set(ctx->codec_ctx->priv_data, "x264-params", "no-cabac=1:ref=1:rc-lookahead=0:slices=1", 0);
+        } else if (cfg->low_end_mode) {
+            av_opt_set(ctx->codec_ctx->priv_data, "x264-params",
+                "ref=2:rc-lookahead=10:sync-lookahead=6:b-adapt=0:aq-mode=1:subme=2:me=hex:trellis=1", 0);
+        } else {
+            av_opt_set(ctx->codec_ctx->priv_data, "x264-params", "ref=1:no-mbtree=1:rc-lookahead=0:sync-lookahead=0:b-adapt=0:aq-mode=0:subme=1:me=dia:trellis=0", 0);
+        }
     }
 
     // Initialize D3D11 Video Processor & Staging Textures
@@ -368,7 +471,7 @@ VideoEncoderContext* ffmpeg_encoder_create(const VideoEncoderConfig *cfg, Packet
             vdesc.InputHeight = ctx->src_height;
             vdesc.OutputWidth = ctx->width;
             vdesc.OutputHeight = ctx->height;
-            vdesc.Usage = D3D11_VIDEO_USAGE_OPTIMAL_QUALITY;
+            vdesc.Usage = cfg->low_end_mode ? D3D11_VIDEO_USAGE_OPTIMAL_SPEED : D3D11_VIDEO_USAGE_OPTIMAL_QUALITY;
 
             HRESULT hr_enum = ctx->video_device->lpVtbl->CreateVideoProcessorEnumerator(
                 ctx->video_device, &vdesc, &ctx->video_enumerator);
@@ -453,7 +556,12 @@ VideoEncoderContext* ffmpeg_encoder_create(const VideoEncoderConfig *cfg, Packet
                 av_opt_set(ctx->codec_ctx->priv_data, "transfer", "bt709", 0);
                 av_opt_set(ctx->codec_ctx->priv_data, "colmatrix", "bt709", 0);
                 av_opt_set(ctx->codec_ctx->priv_data, "fullrange", (cfg->color_range == 1) ? "on" : "off", 0);
-                av_opt_set(ctx->codec_ctx->priv_data, "x264-params", "no-mbtree=1:rc-lookahead=0:sync-lookahead=0:b-adapt=0", 0);
+                if (cfg->low_end_mode) {
+                    av_opt_set(ctx->codec_ctx->priv_data, "x264-params",
+                        "ref=2:rc-lookahead=10:sync-lookahead=6:b-adapt=0:aq-mode=1:subme=2:me=hex:trellis=1", 0);
+                } else {
+                    av_opt_set(ctx->codec_ctx->priv_data, "x264-params", "no-mbtree=1:rc-lookahead=0:sync-lookahead=0:b-adapt=0", 0);
+                }
                 if (cfg->rate_control == RC_CQP) {
                     char qp_str[16];
                     snprintf(qp_str, sizeof(qp_str), "%u", cfg->quality_cqp);
@@ -693,9 +801,9 @@ static inline void convert_bgra_to_nv12_scaled_fast(
             const uint8_t *p11 = row1 + sx1 * 4;
 
             int b00 = p00[0]; int g00 = p00[1]; int r00 = p00[2];
-            int b01 = p01[4]; int g01 = p01[5]; int r01 = p01[6];
+            int b01 = p01[0]; int g01 = p01[1]; int r01 = p01[2];
             int b10 = p10[0]; int g10 = p10[1]; int r10 = p10[2];
-            int b11 = p11[4]; int g11 = p11[5]; int r11 = p11[6];
+            int b11 = p11[0]; int g11 = p11[1]; int r11 = p11[2];
 
             int y00 = y_off + ((yr * r00 + yg * g00 + yb * b00 + 128) >> 8);
             int y01 = y_off + ((yr * r01 + yg * g01 + yb * b01 + 128) >> 8);
@@ -775,9 +883,9 @@ static inline void convert_bgra_to_yuv420p_scaled_fast(
             const uint8_t *p11 = row1 + sx1 * 4;
 
             int b00 = p00[0]; int g00 = p00[1]; int r00 = p00[2];
-            int b01 = p01[4]; int g01 = p01[5]; int r01 = p01[6];
+            int b01 = p01[0]; int g01 = p01[1]; int r01 = p01[2];
             int b10 = p10[0]; int g10 = p10[1]; int r10 = p10[2];
-            int b11 = p11[4]; int g11 = p11[5]; int r11 = p11[6];
+            int b11 = p11[0]; int g11 = p11[1]; int r11 = p11[2];
 
             int y00 = y_off + ((yr * r00 + yg * g00 + yb * b00 + 128) >> 8);
             int y01 = y_off + ((yr * r01 + yg * g01 + yb * b01 + 128) >> 8);
@@ -1476,73 +1584,58 @@ MuxerContext* ffmpeg_muxer_create(
         m->fps = encoder_ctx->fps ? encoder_ctx->fps : 60;
     }
 
-    // 2. Add audio stream (Track 1: System Audio; Track 2: Microphone if multi-track)
     if (audio_cfg && audio_cfg->channels > 0) {
         m->sample_rate = audio_cfg->sample_rate ? audio_cfg->sample_rate : 48000;
         m->channels = audio_cfg->channels ? audio_cfg->channels : 2;
 
         const AVCodec *audio_codec = avcodec_find_encoder(AV_CODEC_ID_AAC);
         if (audio_codec) {
-            // Track 1: System Audio
-            m->audio_codec_ctx = avcodec_alloc_context3(audio_codec);
-            m->audio_codec_ctx->sample_rate = (int)m->sample_rate;
-            av_channel_layout_default(&m->audio_codec_ctx->ch_layout, (int)m->channels);
-            m->audio_codec_ctx->sample_fmt = AV_SAMPLE_FMT_FLTP;
-            m->audio_codec_ctx->bit_rate = (int64_t)(audio_cfg->bitrate_kbps ? audio_cfg->bitrate_kbps : 192) * 1000;
-            m->audio_codec_ctx->time_base = (AVRational){1, (int)m->sample_rate};
-            m->audio_codec_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+            int total_tracks = 1 + (int)(audio_cfg->individual_track_count > 4 ? 4 : audio_cfg->individual_track_count);
+            if (total_tracks > MAX_AUDIO_TRACKS) total_tracks = MAX_AUDIO_TRACKS;
+            m->audio_track_count = 0;
 
-            if (avcodec_open2(m->audio_codec_ctx, audio_codec, NULL) >= 0) {
-                m->audio_stream = avformat_new_stream(m->fmt_ctx, NULL);
-                m->audio_stream->id = 1;
-                m->audio_stream->time_base = m->audio_codec_ctx->time_base;
-                avcodec_parameters_from_context(m->audio_stream->codecpar, m->audio_codec_ctx);
-                av_dict_set(&m->audio_stream->metadata, "title", "System Audio", 0);
+            for (int t = 0; t < total_tracks; t++) {
+                struct AudioTrackState *tr = &m->audio_tracks[t];
+                tr->title = (t == 0) ? "Mix" : g_individual_track_titles[t - 1];
 
-                m->audio_frame = av_frame_alloc();
-                m->audio_frame->nb_samples = m->audio_codec_ctx->frame_size ? m->audio_codec_ctx->frame_size : 1024;
-                m->audio_frame->format = m->audio_codec_ctx->sample_fmt;
-                av_channel_layout_copy(&m->audio_frame->ch_layout, &m->audio_codec_ctx->ch_layout);
-                av_frame_get_buffer(m->audio_frame, 0);
+                tr->codec_ctx = avcodec_alloc_context3(audio_codec);
+                if (!tr->codec_ctx) continue;
+                tr->codec_ctx->sample_rate = (int)m->sample_rate;
+                av_channel_layout_default(&tr->codec_ctx->ch_layout, (int)m->channels);
+                tr->codec_ctx->sample_fmt = AV_SAMPLE_FMT_FLTP;
+                tr->codec_ctx->bit_rate = (int64_t)(audio_cfg->bitrate_kbps ? audio_cfg->bitrate_kbps : 192) * 1000;
+                tr->codec_ctx->time_base = (AVRational){1, (int)m->sample_rate};
+                tr->codec_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
-                m->audio_packet = av_packet_alloc();
-                m->audio_fifo = av_audio_fifo_alloc(
-                    m->audio_codec_ctx->sample_fmt,
-                    m->audio_codec_ctx->ch_layout.nb_channels,
-                    (m->audio_codec_ctx->frame_size ? m->audio_codec_ctx->frame_size : 1024) * 4
-                );
-            }
-
-            // Track 2: Microphone (if multi-track requested)
-            if (audio_cfg->enable_multi_track) {
-                m->audio_codec_ctx_mic = avcodec_alloc_context3(audio_codec);
-                m->audio_codec_ctx_mic->sample_rate = (int)m->sample_rate;
-                av_channel_layout_default(&m->audio_codec_ctx_mic->ch_layout, (int)m->channels);
-                m->audio_codec_ctx_mic->sample_fmt = AV_SAMPLE_FMT_FLTP;
-                m->audio_codec_ctx_mic->bit_rate = (int64_t)(audio_cfg->bitrate_kbps ? audio_cfg->bitrate_kbps : 192) * 1000;
-                m->audio_codec_ctx_mic->time_base = (AVRational){1, (int)m->sample_rate};
-                m->audio_codec_ctx_mic->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-
-                if (avcodec_open2(m->audio_codec_ctx_mic, audio_codec, NULL) >= 0) {
-                    m->audio_stream_mic = avformat_new_stream(m->fmt_ctx, NULL);
-                    m->audio_stream_mic->id = 2;
-                    m->audio_stream_mic->time_base = m->audio_codec_ctx_mic->time_base;
-                    avcodec_parameters_from_context(m->audio_stream_mic->codecpar, m->audio_codec_ctx_mic);
-                    av_dict_set(&m->audio_stream_mic->metadata, "title", "Microphone", 0);
-
-                    m->audio_frame_mic = av_frame_alloc();
-                    m->audio_frame_mic->nb_samples = m->audio_codec_ctx_mic->frame_size ? m->audio_codec_ctx_mic->frame_size : 1024;
-                    m->audio_frame_mic->format = m->audio_codec_ctx_mic->sample_fmt;
-                    av_channel_layout_copy(&m->audio_frame_mic->ch_layout, &m->audio_codec_ctx_mic->ch_layout);
-                    av_frame_get_buffer(m->audio_frame_mic, 0);
-
-                    m->audio_packet_mic = av_packet_alloc();
-                    m->audio_fifo_mic = av_audio_fifo_alloc(
-                        m->audio_codec_ctx_mic->sample_fmt,
-                        m->audio_codec_ctx_mic->ch_layout.nb_channels,
-                        (m->audio_codec_ctx_mic->frame_size ? m->audio_codec_ctx_mic->frame_size : 1024) * 4
-                    );
+                if (avcodec_open2(tr->codec_ctx, audio_codec, NULL) < 0) {
+                    avcodec_free_context(&tr->codec_ctx);
+                    continue;
                 }
+
+                tr->stream = avformat_new_stream(m->fmt_ctx, NULL);
+                if (!tr->stream) {
+                    avcodec_free_context(&tr->codec_ctx);
+                    continue;
+                }
+                tr->stream->id = t;
+                tr->stream->time_base = tr->codec_ctx->time_base;
+                avcodec_parameters_from_context(tr->stream->codecpar, tr->codec_ctx);
+                av_dict_set(&tr->stream->metadata, "title", tr->title, 0);
+
+                tr->frame = av_frame_alloc();
+                tr->frame->nb_samples = tr->codec_ctx->frame_size ? tr->codec_ctx->frame_size : 1024;
+                tr->frame->format = tr->codec_ctx->sample_fmt;
+                av_channel_layout_copy(&tr->frame->ch_layout, &tr->codec_ctx->ch_layout);
+                av_frame_get_buffer(tr->frame, 0);
+
+                tr->packet = av_packet_alloc();
+                tr->fifo = av_audio_fifo_alloc(
+                    tr->codec_ctx->sample_fmt,
+                    tr->codec_ctx->ch_layout.nb_channels,
+                    (tr->codec_ctx->frame_size ? tr->codec_ctx->frame_size : 1024) * 4
+                );
+                tr->next_pts = 0;
+                m->audio_track_count++;
             }
         }
     }
@@ -1617,22 +1710,23 @@ int ffmpeg_muxer_write_video_packet(MuxerContext *m, const EncodedPacket *pkt) {
 int ffmpeg_muxer_write_audio_samples_track(MuxerContext *m, int track_index, const float *pcm_samples, uint32_t sample_count, int64_t pts_nanos) {
     if (!m || !pcm_samples || sample_count == 0) return -1;
     (void)pts_nanos;
+    if (track_index < 0 || track_index >= m->audio_track_count) return -1;
 
     AcquireSRWLockExclusive(&m->lock);
 
-    AVCodecContext *codec_ctx = (track_index == 1 && m->audio_codec_ctx_mic) ? m->audio_codec_ctx_mic : m->audio_codec_ctx;
-    AVStream *stream = (track_index == 1 && m->audio_stream_mic) ? m->audio_stream_mic : m->audio_stream;
-    AVFrame *frame = (track_index == 1 && m->audio_frame_mic) ? m->audio_frame_mic : m->audio_frame;
-    AVPacket *pkt = (track_index == 1 && m->audio_packet_mic) ? m->audio_packet_mic : m->audio_packet;
-    AVAudioFifo *fifo = (track_index == 1 && m->audio_fifo_mic) ? m->audio_fifo_mic : m->audio_fifo;
-    int64_t *next_pts = (track_index == 1 && m->audio_stream_mic) ? &m->next_audio_pts_mic : &m->next_audio_pts;
+    AudioTrackState *tr = &m->audio_tracks[track_index];
+    AVCodecContext *codec_ctx = tr->codec_ctx;
+    AVStream *stream = tr->stream;
+    AVFrame *frame = tr->frame;
+    AVPacket *pkt = tr->packet;
+    AVAudioFifo *fifo = tr->fifo;
+    int64_t *next_pts = &tr->next_pts;
 
     if (!codec_ctx || !stream || !frame || !pkt || !fifo) {
         ReleaseSRWLockExclusive(&m->lock);
         return -1;
     }
 
-    // Deinterleave float PCM into planar channel buffers for the FIFO
     float left_stack[4096];
     float right_stack[4096];
     float *planar_ptrs[2] = { left_stack, right_stack };
@@ -1688,69 +1782,36 @@ int ffmpeg_muxer_close(MuxerContext *m) {
 
     AcquireSRWLockExclusive(&m->lock);
 
-    // Flush remaining samples in Track 1 FIFO with silence padding
-    if (m->audio_fifo && m->audio_codec_ctx && m->audio_stream && m->audio_frame && m->audio_packet) {
-        int rem = av_audio_fifo_size(m->audio_fifo);
+    for (int t = 0; t < m->audio_track_count; t++) {
+        AudioTrackState *tr = &m->audio_tracks[t];
+        if (!tr->codec_ctx || !tr->stream || !tr->frame || !tr->packet || !tr->fifo) continue;
+
+        int rem = av_audio_fifo_size(tr->fifo);
         if (rem > 0) {
-            int frame_size = m->audio_codec_ctx->frame_size ? m->audio_codec_ctx->frame_size : 1024;
-            av_audio_fifo_read(m->audio_fifo, (void**)m->audio_frame->data, rem);
-            for (int ch = 0; ch < m->audio_codec_ctx->ch_layout.nb_channels; ch++) {
-                memset((float*)m->audio_frame->data[ch] + rem, 0, (size_t)(frame_size - rem) * sizeof(float));
+            int frame_size = tr->codec_ctx->frame_size ? tr->codec_ctx->frame_size : 1024;
+            av_audio_fifo_read(tr->fifo, (void**)tr->frame->data, rem);
+            for (int ch = 0; ch < tr->codec_ctx->ch_layout.nb_channels; ch++) {
+                memset((float*)tr->frame->data[ch] + rem, 0, (size_t)(frame_size - rem) * sizeof(float));
             }
-            m->audio_frame->nb_samples = frame_size;
-            m->audio_frame->pts = m->next_audio_pts;
-            m->next_audio_pts += frame_size;
-            if (avcodec_send_frame(m->audio_codec_ctx, m->audio_frame) >= 0) {
-                while (avcodec_receive_packet(m->audio_codec_ctx, m->audio_packet) == 0) {
-                    m->audio_packet->stream_index = m->audio_stream->index;
-                    av_packet_rescale_ts(m->audio_packet, m->audio_codec_ctx->time_base, m->audio_stream->time_base);
-                    av_interleaved_write_frame(m->fmt_ctx, m->audio_packet);
-                    av_packet_unref(m->audio_packet);
+            tr->frame->nb_samples = frame_size;
+            tr->frame->pts = tr->next_pts;
+            tr->next_pts += frame_size;
+            if (avcodec_send_frame(tr->codec_ctx, tr->frame) >= 0) {
+                while (avcodec_receive_packet(tr->codec_ctx, tr->packet) == 0) {
+                    tr->packet->stream_index = tr->stream->index;
+                    av_packet_rescale_ts(tr->packet, tr->codec_ctx->time_base, tr->stream->time_base);
+                    av_interleaved_write_frame(m->fmt_ctx, tr->packet);
+                    av_packet_unref(tr->packet);
                 }
             }
         }
-    }
 
-    if (m->audio_codec_ctx && m->audio_stream && m->audio_packet) {
-        avcodec_send_frame(m->audio_codec_ctx, NULL);
-        while (avcodec_receive_packet(m->audio_codec_ctx, m->audio_packet) == 0) {
-            m->audio_packet->stream_index = m->audio_stream->index;
-            av_packet_rescale_ts(m->audio_packet, m->audio_codec_ctx->time_base, m->audio_stream->time_base);
-            av_interleaved_write_frame(m->fmt_ctx, m->audio_packet);
-            av_packet_unref(m->audio_packet);
-        }
-    }
-
-    // Flush remaining samples in Track 2 (mic) FIFO with silence padding
-    if (m->audio_fifo_mic && m->audio_codec_ctx_mic && m->audio_stream_mic && m->audio_frame_mic && m->audio_packet_mic) {
-        int rem = av_audio_fifo_size(m->audio_fifo_mic);
-        if (rem > 0) {
-            int frame_size = m->audio_codec_ctx_mic->frame_size ? m->audio_codec_ctx_mic->frame_size : 1024;
-            av_audio_fifo_read(m->audio_fifo_mic, (void**)m->audio_frame_mic->data, rem);
-            for (int ch = 0; ch < m->audio_codec_ctx_mic->ch_layout.nb_channels; ch++) {
-                memset((float*)m->audio_frame_mic->data[ch] + rem, 0, (size_t)(frame_size - rem) * sizeof(float));
-            }
-            m->audio_frame_mic->nb_samples = frame_size;
-            m->audio_frame_mic->pts = m->next_audio_pts_mic;
-            m->next_audio_pts_mic += frame_size;
-            if (avcodec_send_frame(m->audio_codec_ctx_mic, m->audio_frame_mic) >= 0) {
-                while (avcodec_receive_packet(m->audio_codec_ctx_mic, m->audio_packet_mic) == 0) {
-                    m->audio_packet_mic->stream_index = m->audio_stream_mic->index;
-                    av_packet_rescale_ts(m->audio_packet_mic, m->audio_codec_ctx_mic->time_base, m->audio_stream_mic->time_base);
-                    av_interleaved_write_frame(m->fmt_ctx, m->audio_packet_mic);
-                    av_packet_unref(m->audio_packet_mic);
-                }
-            }
-        }
-    }
-
-    if (m->audio_codec_ctx_mic && m->audio_stream_mic && m->audio_packet_mic) {
-        avcodec_send_frame(m->audio_codec_ctx_mic, NULL);
-        while (avcodec_receive_packet(m->audio_codec_ctx_mic, m->audio_packet_mic) == 0) {
-            m->audio_packet_mic->stream_index = m->audio_stream_mic->index;
-            av_packet_rescale_ts(m->audio_packet_mic, m->audio_codec_ctx_mic->time_base, m->audio_stream_mic->time_base);
-            av_interleaved_write_frame(m->fmt_ctx, m->audio_packet_mic);
-            av_packet_unref(m->audio_packet_mic);
+        avcodec_send_frame(tr->codec_ctx, NULL);
+        while (avcodec_receive_packet(tr->codec_ctx, tr->packet) == 0) {
+            tr->packet->stream_index = tr->stream->index;
+            av_packet_rescale_ts(tr->packet, tr->codec_ctx->time_base, tr->stream->time_base);
+            av_interleaved_write_frame(m->fmt_ctx, tr->packet);
+            av_packet_unref(tr->packet);
         }
     }
 
@@ -1764,15 +1825,15 @@ int ffmpeg_muxer_close(MuxerContext *m) {
     }
 
     if (m->video_packet) av_packet_free(&m->video_packet);
-    if (m->audio_fifo) av_audio_fifo_free(m->audio_fifo);
-    if (m->audio_fifo_mic) av_audio_fifo_free(m->audio_fifo_mic);
-    if (m->audio_codec_ctx) avcodec_free_context(&m->audio_codec_ctx);
-    if (m->audio_frame) av_frame_free(&m->audio_frame);
-    if (m->audio_packet) av_packet_free(&m->audio_packet);
 
-    if (m->audio_codec_ctx_mic) avcodec_free_context(&m->audio_codec_ctx_mic);
-    if (m->audio_frame_mic) av_frame_free(&m->audio_frame_mic);
-    if (m->audio_packet_mic) av_packet_free(&m->audio_packet_mic);
+    for (int t = 0; t < m->audio_track_count; t++) {
+        AudioTrackState *tr = &m->audio_tracks[t];
+        if (tr->fifo) av_audio_fifo_free(tr->fifo);
+        if (tr->codec_ctx) avcodec_free_context(&tr->codec_ctx);
+        if (tr->frame) av_frame_free(&tr->frame);
+        if (tr->packet) av_packet_free(&tr->packet);
+        tr->stream = NULL;
+    }
 
     if (m->swr_ctx) swr_free(&m->swr_ctx);
 
