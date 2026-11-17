@@ -95,7 +95,7 @@ pub fn main() !void {
             cfg.encoder.preferred_backend = .qsv;
             cfg.encoder.codec = .h264;
             cfg.encoder.qsv_low_power = true;
-            cfg.encoder.qsv_async_depth = 1;
+            cfg.encoder.qsv_async_depth = 4;
         } else if (caps.wmf_h264) {
             cfg.encoder.preferred_backend = .wmf;
             cfg.encoder.codec = .h264;

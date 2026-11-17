@@ -12,7 +12,22 @@
 #include "imgui_impl_dx11.h"
 #include <mmdeviceapi.h>
 #include <audiopolicy.h>
+#include <audioclient.h>
 #include <psapi.h>
+#include <math.h>
+
+extern "C" void lifescreen_dsp_test_mic_process(
+    float* samples,
+    uint32_t frame_count,
+    uint32_t channels,
+    float sample_rate,
+    bool noise_suppression,
+    float ns_strength,
+    bool compressor,
+    float comp_amount,
+    float gain_db,
+    float volume
+);
 
 #ifndef LIFESCREEN_VERSION
 #define LIFESCREEN_VERSION "0.1.0"
@@ -44,6 +59,296 @@ static AppAudioSession g_audioSessions[MAX_AUDIO_SESSIONS];
 static int g_audioSessionCount = 0;
 static DWORD g_lastAudioSessionRefresh = 0;
 static bool g_showAppMixerPopup = false;
+static bool g_showAudioFiltersPopup = false;
+static bool g_micTestActive = false;
+static volatile float g_micTestLevel = 0.0f;
+static volatile LONG g_speakerTestRunning = 0;
+static volatile LONG g_micTestRunning = 0;
+static HANDLE g_micTestThread = NULL;
+
+struct SpeakerTestParams {
+    int device_index;
+    float volume;
+};
+
+struct MicTestParams {
+    int input_index;
+    int output_index;
+    volatile bool noise_suppression;
+    volatile float ns_strength;
+    volatile bool compressor;
+    volatile float comp_amount;
+    volatile float gain_db;
+    volatile float volume;
+};
+
+static MicTestParams g_micTestParams = {0};
+
+static IMMDevice* get_mmdevice_by_index(IMMDeviceEnumerator* pEnum, EDataFlow flow, int index) {
+    if (!pEnum) return NULL;
+    IMMDevice* pDevice = NULL;
+    if (index <= 0) {
+        pEnum->GetDefaultAudioEndpoint(flow, eMultimedia, &pDevice);
+        return pDevice;
+    }
+    IMMDeviceCollection* pCol = NULL;
+    if (SUCCEEDED(pEnum->EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE, &pCol)) && pCol) {
+        UINT count = 0;
+        pCol->GetCount(&count);
+        UINT target = (UINT)(index - 1);
+        if (target < count) {
+            pCol->Item(target, &pDevice);
+        }
+        pCol->Release();
+    }
+    if (!pDevice) {
+        pEnum->GetDefaultAudioEndpoint(flow, eMultimedia, &pDevice);
+    }
+    return pDevice;
+}
+
+static DWORD WINAPI speaker_test_thread_proc(LPVOID lpParam) {
+    SpeakerTestParams* p = (SpeakerTestParams*)lpParam;
+    int dev_idx = p ? p->device_index : 0;
+    float vol = p ? p->volume : 1.0f;
+    if (p) free(p);
+
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    IMMDeviceEnumerator* pEnum = NULL;
+    if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (void**)&pEnum)) && pEnum) {
+        IMMDevice* pDev = get_mmdevice_by_index(pEnum, eRender, dev_idx);
+        pEnum->Release();
+        if (pDev) {
+            IAudioClient* pClient = NULL;
+            if (SUCCEEDED(pDev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, (void**)&pClient)) && pClient) {
+                WAVEFORMATEX* pwfx = NULL;
+                if (SUCCEEDED(pClient->GetMixFormat(&pwfx)) && pwfx) {
+                    if (SUCCEEDED(pClient->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 2000000, 0, pwfx, NULL))) {
+                        IAudioRenderClient* pRender = NULL;
+                        UINT32 bufFrames = 0;
+                        pClient->GetBufferSize(&bufFrames);
+                        if (SUCCEEDED(pClient->GetService(__uuidof(IAudioRenderClient), (void**)&pRender)) && pRender) {
+                            pClient->Start();
+                            const double sr = (double)pwfx->nSamplesPerSec;
+                            const int ch = pwfx->nChannels;
+                            const bool is_float = (pwfx->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) ||
+                                (pwfx->wFormatTag == WAVE_FORMAT_EXTENSIBLE && pwfx->wBitsPerSample == 32);
+                            const double freqs[3] = { 523.25, 659.25, 783.99 };
+                            const UINT32 total_frames = (UINT32)(sr * 0.72);
+                            UINT32 written = 0;
+                            double phase = 0.0;
+                            float gain = (vol > 1.5f ? 1.5f : (vol < 0.05f ? 0.25f : vol)) * 0.22f;
+
+                            while (written < total_frames) {
+                                UINT32 pad = 0;
+                                pClient->GetCurrentPadding(&pad);
+                                UINT32 avail = (bufFrames > pad) ? (bufFrames - pad) : 0;
+                                if (avail == 0) {
+                                    Sleep(5);
+                                    continue;
+                                }
+                                UINT32 to_write = total_frames - written;
+                                if (to_write > avail) to_write = avail;
+                                BYTE* pData = NULL;
+                                if (SUCCEEDED(pRender->GetBuffer(to_write, &pData)) && pData) {
+                                    for (UINT32 i = 0; i < to_write; i++) {
+                                        UINT32 idx = written + i;
+                                        double t = (double)idx / sr;
+                                        int note = (t < 0.24) ? 0 : (t < 0.48 ? 1 : 2);
+                                        double nt = t - note * 0.24;
+                                        double env = 1.0;
+                                        if (nt < 0.015) env = nt / 0.015;
+                                        else if (nt > 0.18) env = (0.24 - nt) / 0.06;
+                                        if (env < 0.0) env = 0.0;
+                                        phase += 2.0 * 3.14159265358979323846 * freqs[note] / sr;
+                                        float s = (float)(sin(phase) * env * gain);
+                                        if (is_float) {
+                                            float* fbuf = (float*)pData;
+                                            for (int c = 0; c < ch; c++) fbuf[i * ch + c] = s;
+                                        } else {
+                                            short* sbuf = (short*)pData;
+                                            short sv = (short)(s * 32767.0f);
+                                            for (int c = 0; c < ch; c++) sbuf[i * ch + c] = sv;
+                                        }
+                                    }
+                                    pRender->ReleaseBuffer(to_write, 0);
+                                    written += to_write;
+                                } else {
+                                    break;
+                                }
+                            }
+                            Sleep(220);
+                            pClient->Stop();
+                            pRender->Release();
+                        }
+                    }
+                    CoTaskMemFree(pwfx);
+                }
+                pClient->Release();
+            }
+            pDev->Release();
+        }
+    }
+    CoUninitialize();
+    InterlockedExchange(&g_speakerTestRunning, 0);
+    return 0;
+}
+
+static void trigger_speaker_test(int device_index, float volume) {
+    if (InterlockedCompareExchange(&g_speakerTestRunning, 1, 0) != 0) return;
+    SpeakerTestParams* p = (SpeakerTestParams*)malloc(sizeof(SpeakerTestParams));
+    if (!p) {
+        InterlockedExchange(&g_speakerTestRunning, 0);
+        return;
+    }
+    p->device_index = device_index;
+    p->volume = volume;
+    HANDLE h = CreateThread(NULL, 0, speaker_test_thread_proc, p, 0, NULL);
+    if (h) CloseHandle(h);
+    else {
+        free(p);
+        InterlockedExchange(&g_speakerTestRunning, 0);
+    }
+}
+
+static DWORD WINAPI mic_test_thread_proc(LPVOID lpParam) {
+    (void)lpParam;
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    IMMDeviceEnumerator* pEnum = NULL;
+    if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (void**)&pEnum)) && pEnum) {
+        IMMDevice* pCapDev = get_mmdevice_by_index(pEnum, eCapture, g_micTestParams.input_index);
+        IMMDevice* pRenDev = get_mmdevice_by_index(pEnum, eRender, g_micTestParams.output_index);
+        pEnum->Release();
+
+        IAudioClient* pCapClient = NULL;
+        IAudioClient* pRenClient = NULL;
+        if (pCapDev && pRenDev &&
+            SUCCEEDED(pCapDev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, (void**)&pCapClient)) &&
+            SUCCEEDED(pRenDev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, (void**)&pRenClient))) {
+            WAVEFORMATEX* capWfx = NULL;
+            WAVEFORMATEX* renWfx = NULL;
+            if (SUCCEEDED(pCapClient->GetMixFormat(&capWfx)) && SUCCEEDED(pRenClient->GetMixFormat(&renWfx)) && capWfx && renWfx) {
+                if (SUCCEEDED(pCapClient->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 1000000, 0, capWfx, NULL)) &&
+                    SUCCEEDED(pRenClient->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 1000000, 0, renWfx, NULL))) {
+                    IAudioCaptureClient* pCap = NULL;
+                    IAudioRenderClient* pRen = NULL;
+                    UINT32 renBufFrames = 0;
+                    pRenClient->GetBufferSize(&renBufFrames);
+                    if (SUCCEEDED(pCapClient->GetService(__uuidof(IAudioCaptureClient), (void**)&pCap)) &&
+                        SUCCEEDED(pRenClient->GetService(__uuidof(IAudioRenderClient), (void**)&pRen))) {
+                        pCapClient->Start();
+                        pRenClient->Start();
+                        float tmpBuf[4096 * 2];
+                        while (InterlockedCompareExchange(&g_micTestRunning, 1, 1) == 1) {
+                            UINT32 pktLen = 0;
+                            if (FAILED(pCap->GetNextPacketSize(&pktLen)) || pktLen == 0) {
+                                Sleep(4);
+                                continue;
+                            }
+                            while (pktLen > 0 && InterlockedCompareExchange(&g_micTestRunning, 1, 1) == 1) {
+                                BYTE* capData = NULL;
+                                UINT32 numFrames = 0;
+                                DWORD flags = 0;
+                                if (FAILED(pCap->GetBuffer(&capData, &numFrames, &flags, NULL, NULL))) break;
+                                UINT32 procFrames = (numFrames > 4096) ? 4096 : numFrames;
+                                UINT32 capCh = capWfx->nChannels ? capWfx->nChannels : 1;
+                                if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
+                                    memset(tmpBuf, 0, procFrames * 2 * sizeof(float));
+                                } else {
+                                    const float* fsrc = (const float*)capData;
+                                    for (UINT32 i = 0; i < procFrames; i++) {
+                                        float l = fsrc[i * capCh];
+                                        float r = (capCh > 1) ? fsrc[i * capCh + 1] : l;
+                                        tmpBuf[i * 2] = l;
+                                        tmpBuf[i * 2 + 1] = r;
+                                    }
+                                }
+                                pCap->ReleaseBuffer(numFrames);
+
+                                lifescreen_dsp_test_mic_process(
+                                    tmpBuf,
+                                    procFrames,
+                                    2,
+                                    (float)capWfx->nSamplesPerSec,
+                                    g_micTestParams.noise_suppression,
+                                    g_micTestParams.ns_strength,
+                                    g_micTestParams.compressor,
+                                    g_micTestParams.comp_amount,
+                                    g_micTestParams.gain_db,
+                                    g_micTestParams.volume
+                                );
+
+                                float peak_after = 0.0f;
+                                for (UINT32 i = 0; i < procFrames * 2; i++) {
+                                    float av = tmpBuf[i] < 0.0f ? -tmpBuf[i] : tmpBuf[i];
+                                    if (av > peak_after) peak_after = av;
+                                }
+                                if (peak_after > 1.0f) peak_after = 1.0f;
+                                g_micTestLevel = peak_after;
+
+                                UINT32 pad = 0;
+                                pRenClient->GetCurrentPadding(&pad);
+                                UINT32 avail = (renBufFrames > pad) ? (renBufFrames - pad) : 0;
+                                UINT32 outFrames = (procFrames < avail) ? procFrames : avail;
+                                if (outFrames > 0) {
+                                    BYTE* renData = NULL;
+                                    if (SUCCEEDED(pRen->GetBuffer(outFrames, &renData)) && renData) {
+                                        float* fdst = (float*)renData;
+                                        UINT32 renCh = renWfx->nChannels ? renWfx->nChannels : 2;
+                                        for (UINT32 i = 0; i < outFrames; i++) {
+                                            float l = tmpBuf[i * 2];
+                                            float r = tmpBuf[i * 2 + 1];
+                                            for (UINT32 c = 0; c < renCh; c++) {
+                                                fdst[i * renCh + c] = (c == 0) ? l : r;
+                                            }
+                                        }
+                                        pRen->ReleaseBuffer(outFrames, 0);
+                                    }
+                                }
+                                pCap->GetNextPacketSize(&pktLen);
+                            }
+                        }
+                        pCapClient->Stop();
+                        pRenClient->Stop();
+                        pCap->Release();
+                        pRen->Release();
+                    }
+                }
+                if (capWfx) CoTaskMemFree(capWfx);
+                if (renWfx) CoTaskMemFree(renWfx);
+            }
+        }
+        if (pCapClient) pCapClient->Release();
+        if (pRenClient) pRenClient->Release();
+        if (pCapDev) pCapDev->Release();
+        if (pRenDev) pRenDev->Release();
+    }
+    CoUninitialize();
+    return 0;
+}
+
+static void update_mic_test_state(bool want_active, const UiState* state) {
+    g_micTestParams.input_index = state->selected_audio_input;
+    g_micTestParams.output_index = state->selected_audio_output;
+    g_micTestParams.noise_suppression = state->mic_noise_suppression;
+    g_micTestParams.ns_strength = state->mic_ns_strength;
+    g_micTestParams.compressor = state->mic_compressor;
+    g_micTestParams.comp_amount = state->mic_comp_amount;
+    g_micTestParams.gain_db = state->mic_gain_db;
+    g_micTestParams.volume = state->mic_volume;
+
+    if (want_active && !g_micTestThread) {
+        InterlockedExchange(&g_micTestRunning, 1);
+        g_micTestThread = CreateThread(NULL, 0, mic_test_thread_proc, NULL, 0, NULL);
+        if (!g_micTestThread) InterlockedExchange(&g_micTestRunning, 0);
+    } else if (!want_active && g_micTestThread) {
+        InterlockedExchange(&g_micTestRunning, 0);
+        WaitForSingleObject(g_micTestThread, 500);
+        CloseHandle(g_micTestThread);
+        g_micTestThread = NULL;
+        g_micTestLevel = 0.0f;
+    }
+}
 
 static void refresh_audio_sessions(void) {
     IMMDeviceEnumerator *pEnumerator = NULL;
@@ -599,74 +904,83 @@ static void setup_modern_dark_theme(void) {
     ImGuiStyle& style = ImGui::GetStyle();
     ImVec4* colors = style.Colors;
 
-    style.WindowRounding    = 8.0f;
-    style.ChildRounding     = 6.0f;
-    style.FrameRounding     = 5.0f;
-    style.PopupRounding     = 6.0f;
-    style.ScrollbarRounding = 4.0f;
-    style.GrabRounding      = 4.0f;
-    style.TabRounding       = 5.0f;
+    style.WindowRounding    = 10.0f;
+    style.ChildRounding     = 10.0f;
+    style.FrameRounding     = 6.0f;
+    style.PopupRounding     = 8.0f;
+    style.ScrollbarRounding = 6.0f;
+    style.GrabRounding      = 6.0f;
+    style.TabRounding       = 6.0f;
 
     style.WindowBorderSize  = 0.0f;
     style.ChildBorderSize   = 1.0f;
     style.FrameBorderSize   = 1.0f;
     style.PopupBorderSize   = 1.0f;
 
-    style.WindowPadding     = ImVec2(16.0f, 14.0f);
-    style.FramePadding      = ImVec2(10.0f, 6.0f);
-    style.ItemSpacing       = ImVec2(10.0f, 8.0f);
-    style.ItemInnerSpacing  = ImVec2(8.0f, 6.0f);
+    style.WindowPadding     = ImVec2(14.0f, 12.0f);
+    style.FramePadding      = ImVec2(10.0f, 5.0f);
+    style.ItemSpacing       = ImVec2(8.0f, 7.0f);
+    style.ItemInnerSpacing  = ImVec2(6.0f, 5.0f);
 
-    // Modern Flat Obsidian / Zinc Dark Palette (Strictly flat, no gradients, clean & professional)
-    colors[ImGuiCol_Text]                  = ImVec4(0.95f, 0.96f, 0.98f, 1.00f);
-    colors[ImGuiCol_TextDisabled]          = ImVec4(0.52f, 0.55f, 0.62f, 1.00f);
-    colors[ImGuiCol_WindowBg]              = ImVec4(0.09f, 0.10f, 0.12f, 1.00f);
-    colors[ImGuiCol_ChildBg]               = ImVec4(0.12f, 0.13f, 0.16f, 1.00f);
-    colors[ImGuiCol_PopupBg]               = ImVec4(0.12f, 0.13f, 0.16f, 0.98f);
-    colors[ImGuiCol_Border]                = ImVec4(0.20f, 0.22f, 0.27f, 0.85f);
+    colors[ImGuiCol_Text]                  = ImVec4(0.94f, 0.96f, 0.99f, 1.00f);
+    colors[ImGuiCol_TextDisabled]          = ImVec4(0.55f, 0.60f, 0.68f, 1.00f);
+    colors[ImGuiCol_WindowBg]              = ImVec4(0.05f, 0.07f, 0.09f, 1.00f);
+    colors[ImGuiCol_ChildBg]               = ImVec4(0.08f, 0.11f, 0.14f, 1.00f);
+    colors[ImGuiCol_PopupBg]               = ImVec4(0.09f, 0.12f, 0.16f, 0.98f);
+    colors[ImGuiCol_Border]                = ImVec4(0.16f, 0.20f, 0.26f, 0.95f);
     colors[ImGuiCol_BorderShadow]          = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-    colors[ImGuiCol_FrameBg]               = ImVec4(0.16f, 0.17f, 0.21f, 1.00f);
-    colors[ImGuiCol_FrameBgHovered]        = ImVec4(0.21f, 0.23f, 0.28f, 1.00f);
-    colors[ImGuiCol_FrameBgActive]         = ImVec4(0.26f, 0.28f, 0.35f, 1.00f);
-    colors[ImGuiCol_TitleBg]               = ImVec4(0.09f, 0.10f, 0.12f, 1.00f);
-    colors[ImGuiCol_TitleBgActive]         = ImVec4(0.11f, 0.12f, 0.15f, 1.00f);
-    colors[ImGuiCol_TitleBgCollapsed]      = ImVec4(0.09f, 0.10f, 0.12f, 1.00f);
-    colors[ImGuiCol_MenuBarBg]             = ImVec4(0.11f, 0.12f, 0.15f, 1.00f);
-    colors[ImGuiCol_ScrollbarBg]           = ImVec4(0.09f, 0.10f, 0.12f, 0.60f);
-    colors[ImGuiCol_ScrollbarGrab]         = ImVec4(0.22f, 0.24f, 0.29f, 1.00f);
-    colors[ImGuiCol_ScrollbarGrabHovered]  = ImVec4(0.28f, 0.31f, 0.38f, 1.00f);
-    colors[ImGuiCol_ScrollbarGrabActive]   = ImVec4(0.35f, 0.38f, 0.46f, 1.00f);
-    colors[ImGuiCol_CheckMark]             = ImVec4(0.22f, 0.65f, 0.98f, 1.00f);
-    colors[ImGuiCol_SliderGrab]            = ImVec4(0.22f, 0.65f, 0.98f, 1.00f);
-    colors[ImGuiCol_SliderGrabActive]      = ImVec4(0.38f, 0.75f, 1.00f, 1.00f);
-    colors[ImGuiCol_Button]                = ImVec4(0.17f, 0.19f, 0.23f, 1.00f);
-    colors[ImGuiCol_ButtonHovered]         = ImVec4(0.23f, 0.25f, 0.31f, 1.00f);
-    colors[ImGuiCol_ButtonActive]          = ImVec4(0.28f, 0.31f, 0.38f, 1.00f);
-    colors[ImGuiCol_Header]                = ImVec4(0.17f, 0.19f, 0.23f, 1.00f);
-    colors[ImGuiCol_HeaderHovered]         = ImVec4(0.23f, 0.25f, 0.31f, 1.00f);
-    colors[ImGuiCol_HeaderActive]          = ImVec4(0.28f, 0.31f, 0.38f, 1.00f);
-    colors[ImGuiCol_Separator]             = ImVec4(0.20f, 0.22f, 0.27f, 0.80f);
-    colors[ImGuiCol_Tab]                   = ImVec4(0.12f, 0.13f, 0.16f, 1.00f);
-    colors[ImGuiCol_TabHovered]            = ImVec4(0.19f, 0.21f, 0.26f, 1.00f);
-    colors[ImGuiCol_TabActive]             = ImVec4(0.16f, 0.18f, 0.22f, 1.00f);
-    colors[ImGuiCol_TabUnfocused]          = ImVec4(0.10f, 0.11f, 0.13f, 1.00f);
-    colors[ImGuiCol_TabUnfocusedActive]    = ImVec4(0.13f, 0.14f, 0.17f, 1.00f);
-    colors[ImGuiCol_PlotHistogram]         = ImVec4(0.16f, 0.72f, 0.40f, 1.00f);
-    colors[ImGuiCol_PlotHistogramHovered]  = ImVec4(0.22f, 0.82f, 0.48f, 1.00f);
+    colors[ImGuiCol_FrameBg]               = ImVec4(0.12f, 0.15f, 0.20f, 1.00f);
+    colors[ImGuiCol_FrameBgHovered]        = ImVec4(0.16f, 0.20f, 0.27f, 1.00f);
+    colors[ImGuiCol_FrameBgActive]         = ImVec4(0.20f, 0.26f, 0.35f, 1.00f);
+    colors[ImGuiCol_TitleBg]               = ImVec4(0.06f, 0.08f, 0.11f, 1.00f);
+    colors[ImGuiCol_TitleBgActive]         = ImVec4(0.09f, 0.12f, 0.16f, 1.00f);
+    colors[ImGuiCol_TitleBgCollapsed]      = ImVec4(0.06f, 0.08f, 0.11f, 1.00f);
+    colors[ImGuiCol_MenuBarBg]             = ImVec4(0.08f, 0.10f, 0.13f, 1.00f);
+    colors[ImGuiCol_ScrollbarBg]           = ImVec4(0.06f, 0.08f, 0.10f, 0.60f);
+    colors[ImGuiCol_ScrollbarGrab]         = ImVec4(0.20f, 0.25f, 0.32f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrabHovered]  = ImVec4(0.26f, 0.32f, 0.41f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrabActive]   = ImVec4(0.32f, 0.39f, 0.50f, 1.00f);
+    colors[ImGuiCol_CheckMark]             = ImVec4(0.24f, 0.66f, 1.00f, 1.00f);
+    colors[ImGuiCol_SliderGrab]            = ImVec4(0.24f, 0.66f, 1.00f, 1.00f);
+    colors[ImGuiCol_SliderGrabActive]      = ImVec4(0.42f, 0.76f, 1.00f, 1.00f);
+    colors[ImGuiCol_Button]                = ImVec4(0.14f, 0.18f, 0.24f, 1.00f);
+    colors[ImGuiCol_ButtonHovered]         = ImVec4(0.19f, 0.25f, 0.33f, 1.00f);
+    colors[ImGuiCol_ButtonActive]          = ImVec4(0.23f, 0.30f, 0.40f, 1.00f);
+    colors[ImGuiCol_Header]                = ImVec4(0.15f, 0.20f, 0.27f, 1.00f);
+    colors[ImGuiCol_HeaderHovered]         = ImVec4(0.20f, 0.27f, 0.36f, 1.00f);
+    colors[ImGuiCol_HeaderActive]          = ImVec4(0.24f, 0.32f, 0.43f, 1.00f);
+    colors[ImGuiCol_Separator]             = ImVec4(0.16f, 0.20f, 0.26f, 0.90f);
+    colors[ImGuiCol_Tab]                   = ImVec4(0.08f, 0.11f, 0.14f, 1.00f);
+    colors[ImGuiCol_TabHovered]            = ImVec4(0.15f, 0.20f, 0.27f, 1.00f);
+    colors[ImGuiCol_TabActive]             = ImVec4(0.14f, 0.19f, 0.26f, 1.00f);
+    colors[ImGuiCol_TabUnfocused]          = ImVec4(0.07f, 0.09f, 0.12f, 1.00f);
+    colors[ImGuiCol_TabUnfocusedActive]    = ImVec4(0.11f, 0.14f, 0.19f, 1.00f);
+    colors[ImGuiCol_PlotHistogram]         = ImVec4(0.18f, 0.78f, 0.45f, 1.00f);
+    colors[ImGuiCol_PlotHistogramHovered]  = ImVec4(0.24f, 0.88f, 0.52f, 1.00f);
 }
 
 bool imgui_window_create(int width, int height, const char* title) {
+    HINSTANCE hInst = GetModuleHandle(NULL);
+    HICON hEmbeddedIcon = LoadIconW(hInst, MAKEINTRESOURCEW(1));
+    if (!hEmbeddedIcon) {
+        hEmbeddedIcon = (HICON)LoadImageW(NULL, L"resources\\icon.ico", IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE);
+    }
+    if (!hEmbeddedIcon) {
+        hEmbeddedIcon = (HICON)LoadImageW(NULL, L"..\\resources\\icon.ico", IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE);
+    }
+
     WNDCLASSEXW wc = {
         sizeof(WNDCLASSEXW),
         CS_CLASSDC,
         WndProc,
         0L, 0L,
-        GetModuleHandle(NULL),
-        NULL, NULL, NULL, NULL,
+        hInst,
+        hEmbeddedIcon,
+        LoadCursor(NULL, IDC_ARROW),
+        NULL, NULL,
         L"LifeScreenRecorderClass",
-        NULL
+        hEmbeddedIcon
     };
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     RegisterClassExW(&wc);
 
     RECT wr = { 0, 0, width, height };
@@ -900,6 +1214,92 @@ static void clear_session_logs(void) {
     g_uiLogCount = 0;
 }
 
+static void draw_led_vu_meter(const char* id, float level, bool enabled, float width, float height) {
+    ImGui::PushID(id);
+    ImVec2 p0 = ImGui::GetCursorScreenPos();
+    if (width <= 0.0f) width = ImGui::GetContentRegionAvail().x;
+    if (height <= 0.0f) height = 22.0f;
+    ImVec2 p1 = ImVec2(p0.x + width, p0.y + height);
+    ImGui::Dummy(ImVec2(width, height));
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    float clamped = enabled ? (level < 0.0f ? 0.0f : (level > 1.0f ? 1.0f : level)) : 0.0f;
+
+    dl->AddRectFilled(p0, p1, IM_COL32(15, 20, 27, 255), 5.0f);
+    dl->AddRect(p0, p1, IM_COL32(40, 49, 61, 255), 5.0f, 0, 1.0f);
+
+    float pad = 3.0f;
+    float inner_w = width - pad * 2.0f;
+    float fill_w = inner_w * clamped;
+    if (fill_w > 1.0f) {
+        float g_end = inner_w * 0.70f;
+        float a_end = inner_w * 0.90f;
+        float y0 = p0.y + pad;
+        float y1 = p1.y - pad;
+
+        float w1 = (fill_w < g_end) ? fill_w : g_end;
+        if (w1 > 0.5f) {
+            dl->AddRectFilled(ImVec2(p0.x + pad, y0), ImVec2(p0.x + pad + w1, y1), IM_COL32(46, 204, 113, 255), 3.0f);
+        }
+        if (fill_w > g_end) {
+            float x_start = p0.x + pad + g_end;
+            float w2 = ((fill_w < a_end) ? fill_w : a_end) - g_end;
+            if (w2 > 0.5f) {
+                dl->AddRectFilled(ImVec2(x_start, y0), ImVec2(x_start + w2, y1), IM_COL32(241, 196, 15, 255), 2.0f);
+            }
+        }
+        if (fill_w > a_end) {
+            float x_start = p0.x + pad + a_end;
+            float w3 = fill_w - a_end;
+            if (w3 > 0.5f) {
+                dl->AddRectFilled(ImVec2(x_start, y0), ImVec2(x_start + w3, y1), IM_COL32(231, 76, 60, 255), 2.0f);
+            }
+        }
+    }
+
+    int segs = 8;
+    for (int s = 1; s < segs; s++) {
+        float sx = p0.x + pad + (inner_w * (float)s / (float)segs);
+        dl->AddLine(ImVec2(sx, p0.y + 2.0f), ImVec2(sx, p1.y - 2.0f), IM_COL32(15, 20, 27, 170), 1.0f);
+    }
+
+    char pct_buf[16];
+    snprintf(pct_buf, sizeof(pct_buf), "%d%%", (int)(clamped * 100.0f + 0.5f));
+    ImVec2 tsz = ImGui::CalcTextSize(pct_buf);
+    ImVec2 tpos = ImVec2(p0.x + (width - tsz.x) * 0.5f, p0.y + (height - tsz.y) * 0.5f);
+    dl->AddText(tpos, enabled ? IM_COL32(235, 242, 250, 230) : IM_COL32(115, 125, 140, 180), pct_buf);
+
+    ImGui::PopID();
+}
+
+static void draw_telemetry_badge(const char* id, const char* label, const char* value, ImVec4 accent_col, float width, float height) {
+    ImGui::PushID(id);
+    ImVec2 p0 = ImGui::GetCursorScreenPos();
+    ImVec2 p1 = ImVec2(p0.x + width, p0.y + height);
+    ImGui::Dummy(ImVec2(width, height));
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p0, p1, IM_COL32(18, 24, 33, 255), 7.0f);
+    dl->AddRect(p0, p1, IM_COL32(42, 52, 66, 230), 7.0f, 0, 1.0f);
+
+    ImU32 acc_u32 = ImGui::ColorConvertFloat4ToU32(accent_col);
+    dl->AddRectFilled(ImVec2(p0.x + 2.0f, p0.y + 5.0f), ImVec2(p0.x + 5.5f, p1.y - 5.0f), acc_u32, 2.0f);
+
+    ImVec2 lsz = ImGui::CalcTextSize(label);
+    ImVec2 vsz = ImGui::CalcTextSize(value);
+    if (lsz.x + vsz.x + 28.0f <= width && height < 44.0f) {
+        float tx = p0.x + 12.0f;
+        float ty = p0.y + (height - vsz.y) * 0.5f;
+        dl->AddText(ImVec2(tx, ty), IM_COL32(145, 158, 178, 255), label);
+        dl->AddText(ImVec2(tx + lsz.x + 6.0f, ty), acc_u32, value);
+    } else {
+        dl->AddText(ImVec2(p0.x + 12.0f, p0.y + 5.0f), IM_COL32(145, 158, 178, 255), label);
+        dl->AddText(ImVec2(p0.x + 12.0f, p0.y + height - vsz.y - 5.0f), acc_u32, value);
+    }
+
+    ImGui::PopID();
+}
+
 void imgui_window_render_ui(UiState* state) {
     int lang = state->language;
     bool is_recording = (state->state == 2 || state->state == 3);
@@ -1006,13 +1406,14 @@ void imgui_window_render_ui(UiState* state) {
         g_lastUiState = state->state;
     }
 
-    ImGuiWindowFlags window_flags = 
+    ImGuiWindowFlags window_flags =
         ImGuiWindowFlags_NoTitleBar |
         ImGuiWindowFlags_NoResize |
         ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoCollapse |
         ImGuiWindowFlags_NoScrollbar |
-        ImGuiWindowFlags_NoScrollWithMouse;
+        ImGuiWindowFlags_NoScrollWithMouse |
+        ImGuiWindowFlags_NoBringToFrontOnFocus;
 
     ImGui::Begin("LifeScreenMainWindow", NULL, window_flags);
 
@@ -1055,35 +1456,27 @@ void imgui_window_render_ui(UiState* state) {
             float total_w = ImGui::GetContentRegionAvail().x;
             float avail_h = ImGui::GetContentRegionAvail().y;
 
-            // Compute proportional heights to fill 100% of vertical space with ZERO scrollbars!
             float spacing_y = ImGui::GetStyle().ItemSpacing.y;
+            float spacing_x = ImGui::GetStyle().ItemSpacing.x;
             float total_gaps = spacing_y * 2.0f + 6.0f;
-            float usable_h = (avail_h > total_gaps + 400.0f) ? (avail_h - total_gaps) : 440.0f;
+            float usable_h = (avail_h > total_gaps + 480.0f) ? (avail_h - total_gaps) : 500.0f;
 
-            // 3 Rows:
-            // Row 1 (Source & Audio): 40% of height (min 200px)
-            // Row 2 (Quick Settings): 28% of height (min 135px)
-            // Row 3 (Action Deck): remaining 32% of height (min 165px)
-            float h_row1 = usable_h * 0.40f;
-            if (h_row1 < 200.0f) h_row1 = 200.0f;
+            float h_row1 = usable_h * 0.48f;
+            if (h_row1 < 252.0f) h_row1 = 252.0f;
 
-            float h_row2 = usable_h * 0.28f;
-            if (h_row2 < 135.0f) h_row2 = 135.0f;
+            float h_row2 = usable_h * 0.23f;
+            if (h_row2 < 122.0f) h_row2 = 122.0f;
 
             float h_row3 = usable_h - h_row1 - h_row2;
-            if (h_row3 < 165.0f) h_row3 = 165.0f;
+            if (h_row3 < 142.0f) h_row3 = 142.0f;
 
-            float col_w = (total_w - 16.0f) * 0.5f;
+            float col_w = (total_w - spacing_x) * 0.5f;
 
-            // ==========================================
-            // TOP ROW: [1. VIDEO SOURCE] and [2. AUDIO & MICROPHONE]
-            // ==========================================
-
-            // LEFT CARD: 1. Video Source
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.14f, 0.15f, 0.18f, 1.00f));
-            ImGui::BeginChild("SourceCard", ImVec2(col_w, h_row1), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.08f, 0.11f, 0.14f, 1.00f));
+            ImGui::BeginChild("SourceCard", ImVec2(col_w, h_row1), true);
             {
-                ImGui::TextColored(ImVec4(0.20f, 0.65f, 1.00f, 1.00f), "%s",
+                float s_inner_w = ImGui::GetContentRegionAvail().x;
+                ImGui::TextColored(ImVec4(0.24f, 0.66f, 1.00f, 1.00f), "%s",
                     tr(lang,
                         "1. VIDEO SOURCE & DISPLAY",
                         "1. ДЖЕРЕЛО ВІДЕО ТА ДИСПЛЕЙ",
@@ -1092,35 +1485,35 @@ void imgui_window_render_ui(UiState* state) {
                         "1. SOURCE VIDÉO & ÉCRAN",
                         "1. ŹRÓDŁO WIDEO I EKRAN"));
                 ImGui::Spacing();
-                if (h_row1 > 260.0f) ImGui::Spacing();
 
                 bool is_screen = (state->capture_type == 0);
                 bool is_window = (state->capture_type == 1);
                 bool is_game   = (state->capture_type == 2);
 
-                float btn_w = (col_w - 38.0f) / 3.0f;
-                float btn_h = (h_row1 > 260.0f) ? 36.0f : 30.0f;
-                if (is_screen) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.53f, 0.90f, 1.00f));
+                float btn_w = (s_inner_w - spacing_x * 2.0f) / 3.0f;
+                float btn_h = (h_row1 > 270.0f) ? 34.0f : 30.0f;
+                if (is_screen) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f, 0.50f, 0.92f, 1.00f));
                 if (ImGui::Button(tr(lang, "Screen", "Екран", "屏幕", "Bildschirm", "Écran", "Ekran"), ImVec2(btn_w, btn_h))) state->capture_type = 0;
                 if (is_screen) ImGui::PopStyleColor();
 
                 ImGui::SameLine();
-                if (is_window) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.53f, 0.90f, 1.00f));
+                if (is_window) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f, 0.50f, 0.92f, 1.00f));
                 if (ImGui::Button(tr(lang, "Window", "Вікно", "窗口", "Fenster", "Fenêtre", "Okno"), ImVec2(btn_w, btn_h))) state->capture_type = 1;
                 if (is_window) ImGui::PopStyleColor();
 
                 ImGui::SameLine();
-                if (is_game) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.53f, 0.90f, 1.00f));
+                if (is_game) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f, 0.50f, 0.92f, 1.00f));
                 if (ImGui::Button(tr(lang, "Game", "Гра", "游戏", "Spiel", "Jeu", "Gra"), ImVec2(btn_w, btn_h))) state->capture_type = 2;
                 if (is_game) ImGui::PopStyleColor();
 
                 ImGui::Spacing();
 
+                float refresh_w = 84.0f;
                 if (state->capture_type == 0) {
                     ImGui::TextDisabled("%s", tr(lang, "Display / Monitor:", "Монітор / Дисплей:", "显示器 / 屏幕:", "Monitor / Anzeige:", "Moniteur / Écran :", "Monitor / Wyświetlacz:"));
                     const char* current_mon = (state->monitor_count > 0 && state->selected_monitor < state->monitor_count)
                         ? state->monitor_names[state->selected_monitor] : "Default Display";
-                    ImGui::SetNextItemWidth(col_w - 28.0f);
+                    ImGui::SetNextItemWidth(s_inner_w);
                     if (ImGui::BeginCombo("##MonitorSelect", current_mon)) {
                         for (int i = 0; i < state->monitor_count; i++) {
                             bool is_selected = (state->selected_monitor == i);
@@ -1135,7 +1528,7 @@ void imgui_window_render_ui(UiState* state) {
                     const char* current_win = (state->window_count > 0 && state->selected_window < state->window_count)
                         ? state->window_names[state->selected_window]
                         : tr(lang, "Select window...", "Виберіть вікно...", "选择窗口...", "Fenster wählen...", "Choisir une fenêtre...", "Wybierz okno...");
-                    ImGui::SetNextItemWidth(col_w - 110.0f);
+                    ImGui::SetNextItemWidth(s_inner_w - refresh_w - spacing_x);
                     if (ImGui::BeginCombo("##WindowSelect", current_win)) {
                         for (int i = 0; i < state->window_count; i++) {
                             bool is_selected = (state->selected_window == i);
@@ -1146,7 +1539,7 @@ void imgui_window_render_ui(UiState* state) {
                         ImGui::EndCombo();
                     }
                     ImGui::SameLine();
-                    if (ImGui::Button(tr(lang, "Refresh", "Оновити", "刷新", "Aktualis.", "Actualiser", "Odśwież"), ImVec2(74, 26))) {
+                    if (ImGui::Button(tr(lang, "Refresh", "Оновити", "刷新", "Aktualis.", "Actualiser", "Odśwież"), ImVec2(refresh_w, 26))) {
                         state->action_refresh_windows_requested = true;
                     }
                 } else {
@@ -1154,7 +1547,7 @@ void imgui_window_render_ui(UiState* state) {
                     const char* current_win = (state->window_count > 0 && state->selected_window < state->window_count)
                         ? state->window_names[state->selected_window]
                         : tr(lang, "Select game window...", "Виберіть гру зі списку...", "从列表中选择游戏...", "Spielfenster wählen...", "Choisir le jeu...", "Wybierz okno gry...");
-                    ImGui::SetNextItemWidth(col_w - 110.0f);
+                    ImGui::SetNextItemWidth(s_inner_w - refresh_w - spacing_x);
                     if (ImGui::BeginCombo("##GameSelect", current_win)) {
                         for (int i = 0; i < state->window_count; i++) {
                             bool is_selected = (state->selected_window == i);
@@ -1165,51 +1558,112 @@ void imgui_window_render_ui(UiState* state) {
                         ImGui::EndCombo();
                     }
                     ImGui::SameLine();
-                    if (ImGui::Button(tr(lang, "Refresh", "Оновити", "刷新", "Aktualis.", "Actualiser", "Odśwież"), ImVec2(74, 26))) {
+                    if (ImGui::Button(tr(lang, "Refresh", "Оновити", "刷新", "Aktualis.", "Actualiser", "Odśwież"), ImVec2(refresh_w, 26))) {
                         state->action_refresh_windows_requested = true;
                     }
                 }
 
                 ImGui::Spacing();
-                if (h_row1 > 260.0f) ImGui::Spacing();
-
+                float half_col_x = ImGui::GetCursorPosX() + s_inner_w * 0.50f;
                 if (ImGui::Checkbox(tr(lang, "Capture Cursor", "Курсор миші", "捕获鼠标指针", "Mauszeiger", "Curseur souris", "Kursor myszy"), &state->capture_cursor)) {
                     state->action_settings_changed = true;
                 }
-                ImGui::SameLine(col_w * 0.48f);
+                ImGui::SameLine(half_col_x);
                 if (ImGui::Checkbox(tr(lang, "Overlay (F9)", "Оверлей (F9)", "悬浮窗 (F9)", "Overlay (F9)", "Overlay (F9)", "Nakładka (F9)"), &state->show_overlay_indicator)) {
                     state->action_settings_changed = true;
                 }
+
+                if (ImGui::Checkbox(tr(lang, "Weak PC Mode", "Слабкий ПК", "弱电脑模式", "Schwacher PC", "Mode PC faible", "Słaby PC"), &state->low_end_mode)) {
+                    state->action_settings_changed = true;
+                    if (state->low_end_mode) {
+                        state->output_resolution = 1;
+                        state->target_fps = 30;
+                        state->encoder_preset = 0;
+                        if ((state->encoder_caps_mask & (1 << 6)) != 0) {
+                            state->encoder_choice = 0;
+                            state->qsv_low_power = true;
+                            state->qsv_async_depth = 4;
+                        } else if ((state->encoder_caps_mask & (1 << 11)) != 0) {
+                            state->encoder_choice = 4;
+                            state->wmf_hw_encoding = true;
+                        } else if ((state->encoder_caps_mask & ((1 << 0) | (1 << 3))) != 0) {
+                            state->encoder_choice = 3;
+                        }
+                    }
+                }
+                ImGui::SameLine(half_col_x);
+                if (ImGui::Checkbox(tr(lang, "Multi-Track", "Мульти-трек", "多音轨", "Multi-Spur", "Multi-piste", "Wielościeżk."), &state->separate_audio_tracks)) {
+                    state->action_settings_changed = true;
+                }
+
+                ImGui::Spacing();
+                const char* cap_engine = (state->capture_type == 2) ? "Game Hook + WGC" : "WGC Zero-Copy";
+                const char* enc_names[8] = {
+                    "QuickSync H.264", "QuickSync HEVC", "Intel MSDK",
+                    "NVENC / AMF HW", "WMF Hardware", "OpenH264",
+                    "libx264 CPU", "MJPEG"
+                };
+                const char* active_enc = (state->encoder_choice >= 0 && state->encoder_choice < 8)
+                    ? enc_names[state->encoder_choice] : "Auto";
+                char engine_pill[96];
+                snprintf(engine_pill, sizeof(engine_pill), "%s  |  %s", cap_engine, active_enc);
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.06f, 0.08f, 0.10f, 1.00f));
+                ImGui::BeginChild("##EnginePill", ImVec2(s_inner_w, 26.0f), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+                ImVec2 esz = ImGui::CalcTextSize(engine_pill);
+                ImGui::SetCursorPosY((26.0f - esz.y) * 0.5f);
+                ImGui::SetCursorPosX((s_inner_w - esz.x) * 0.5f);
+                ImGui::TextColored(ImVec4(0.45f, 0.78f, 0.96f, 1.00f), "%s", engine_pill);
+                ImGui::EndChild();
+                ImGui::PopStyleColor();
             }
             ImGui::EndChild();
             ImGui::PopStyleColor();
 
             ImGui::SameLine();
 
-            // RIGHT CARD: 2. Audio & Sound Controls
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.14f, 0.15f, 0.18f, 1.00f));
-            ImGui::BeginChild("AudioCard", ImVec2(col_w, h_row1), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-            {
-                ImGui::TextColored(ImVec4(0.20f, 0.65f, 1.00f, 1.00f), "%s",
-                    tr(lang,
-                        "2. AUDIO & MICROPHONE",
-                        "2. АУДІО ТА МІКРОФОН",
-                        "2. 系统音频与麦克风",
-                        "2. AUDIO & MIKROFON",
-                        "2. AUDIO & MICROPHONE",
-                        "2. DŹWIĘK I MIKROFON"));
-                ImGui::Spacing();
-                if (h_row1 > 260.0f) ImGui::Spacing();
+            if (is_recording && g_micTestActive) {
+                g_micTestActive = false;
+            }
+            update_mic_test_state(g_micTestActive && !is_recording, state);
 
-                // Channel 1: System Audio Checkbox & Device Dropdown
-                if (ImGui::Checkbox(tr(lang, "System Audio", "Звук системи", "系统声音", "Systemton", "Son système", "Dźwięk systemu"), &state->record_system_audio)) {
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.08f, 0.11f, 0.14f, 1.00f));
+            ImGui::BeginChild("AudioCard", ImVec2(col_w, h_row1), true);
+            {
+                float inner_w = ImGui::GetContentRegionAvail().x;
+                float hdr_btn1_w = 96.0f;
+                float hdr_btn2_w = 88.0f;
+
+                ImGui::TextColored(ImVec4(0.24f, 0.66f, 1.00f, 1.00f), "%s",
+                    tr(lang,
+                        "2. AUDIO & MIC",
+                        "2. АУДІО ТА МІКРОФОН",
+                        "2. 音频与麦克风",
+                        "2. AUDIO & MIKRO",
+                        "2. AUDIO & MICRO",
+                        "2. AUDIO I MIKRO"));
+                ImGui::SameLine(inner_w - hdr_btn1_w - hdr_btn2_w - spacing_x + 14.0f);
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f, 0.28f, 0.48f, 1.00f));
+                if (ImGui::Button(tr(lang, "Filters DSP##Hdr", "Фільтри DSP##Hdr", "DSP 滤镜##Hdr", "DSP-Filter##Hdr", "Filtres DSP##Hdr", "Filtry DSP##Hdr"), ImVec2(hdr_btn1_w, 22))) {
+                    g_showAudioFiltersPopup = true;
+                }
+                ImGui::PopStyleColor();
+                ImGui::SameLine();
+                if (ImGui::Button(tr(lang, "App Mixer##Hdr", "Програми##Hdr", "应用音量##Hdr", "App-Mixer##Hdr", "Mixeur##Hdr", "Aplikacje##Hdr"), ImVec2(hdr_btn2_w, 22))) {
+                    g_showAppMixerPopup = true;
+                }
+
+                ImGui::Spacing();
+
+                float test_btn_w = 68.0f;
+                float meter_w = 118.0f;
+
+                if (ImGui::Checkbox(tr(lang, "System", "Система", "系统", "System", "Système", "System"), &state->record_system_audio)) {
                     state->action_settings_changed = true;
                 }
                 ImGui::SameLine();
-                float cur_x1 = ImGui::GetCursorPosX();
-                float dev_w1 = col_w - cur_x1 - 14.0f;
-                if (dev_w1 < 120.0f) dev_w1 = 120.0f;
-                ImGui::SetNextItemWidth(dev_w1);
+                float avail1 = ImGui::GetContentRegionAvail().x - test_btn_w - spacing_x;
+                if (avail1 < 90.0f) avail1 = 90.0f;
+                ImGui::SetNextItemWidth(avail1);
                 const char* cur_out = (state->audio_output_count > 0 && state->selected_audio_output < state->audio_output_count)
                     ? state->audio_output_names[state->selected_audio_output] : "Default Device";
                 if (ImGui::BeginCombo("##AudioOutDev", cur_out)) {
@@ -1222,11 +1676,13 @@ void imgui_window_render_ui(UiState* state) {
                     }
                     ImGui::EndCombo();
                 }
+                ImGui::SameLine();
+                if (ImGui::Button(tr(lang, "Test##Spk", "Тест##Spk", "测试##Spk", "Test##Spk", "Test##Spk", "Test##Spk"), ImVec2(test_btn_w, 24))) {
+                    trigger_speaker_test(state->selected_audio_output, state->system_volume);
+                }
 
-                // Volume slider + VU Meter
                 ImGui::BeginDisabled(!state->record_system_audio);
-                float meter_w = 90.0f;
-                float slider_w = col_w - 28.0f - meter_w - 8.0f;
+                float slider_w = inner_w - meter_w - spacing_x;
                 if (slider_w < 100.0f) slider_w = 100.0f;
                 ImGui::SetNextItemWidth(slider_w);
                 int sys_pct = (int)(state->system_volume * 100.0f + 0.5f);
@@ -1238,21 +1694,18 @@ void imgui_window_render_ui(UiState* state) {
                     state->action_settings_changed = true;
                 }
                 ImGui::SameLine();
-                ImGui::ProgressBar(state->record_system_audio ? state->sys_audio_level : 0.0f, ImVec2(meter_w, 20), "");
+                draw_led_vu_meter("##SysMeter", state->sys_audio_level, state->record_system_audio, meter_w, 22.0f);
                 ImGui::EndDisabled();
 
                 ImGui::Spacing();
-                if (h_row1 > 260.0f) ImGui::Spacing();
 
-                // Channel 2: Microphone Checkbox & Device Dropdown
-                if (ImGui::Checkbox(tr(lang, "Microphone", "Мікрофон", "麦克风", "Mikrofon", "Microphone", "Mikrofon"), &state->record_microphone)) {
+                if (ImGui::Checkbox(tr(lang, "Mic", "Мікр.", "麦克风", "Mikro", "Micro", "Mikr."), &state->record_microphone)) {
                     state->action_settings_changed = true;
                 }
                 ImGui::SameLine();
-                float cur_x2 = ImGui::GetCursorPosX();
-                float dev_w2 = col_w - cur_x2 - 14.0f;
-                if (dev_w2 < 120.0f) dev_w2 = 120.0f;
-                ImGui::SetNextItemWidth(dev_w2);
+                float avail2 = ImGui::GetContentRegionAvail().x - test_btn_w - spacing_x;
+                if (avail2 < 90.0f) avail2 = 90.0f;
+                ImGui::SetNextItemWidth(avail2);
                 const char* cur_in = (state->audio_input_count > 0 && state->selected_audio_input < state->audio_input_count)
                     ? state->audio_input_names[state->selected_audio_input] : "Default Microphone";
                 if (ImGui::BeginCombo("##AudioInDev", cur_in)) {
@@ -1265,9 +1718,20 @@ void imgui_window_render_ui(UiState* state) {
                     }
                     ImGui::EndCombo();
                 }
+                ImGui::SameLine();
+                ImGui::BeginDisabled(is_recording);
+                if (g_micTestActive) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f, 0.58f, 0.34f, 1.00f));
+                if (ImGui::Button(
+                        g_micTestActive
+                            ? tr(lang, "Stop##MicT", "Стоп##MicT", "停止##MicT", "Stop##MicT", "Stop##MicT", "Stop##MicT")
+                            : tr(lang, "Test##MicT", "Тест##MicT", "测试##MicT", "Test##MicT", "Test##MicT", "Test##MicT"),
+                        ImVec2(test_btn_w, 24))) {
+                    g_micTestActive = !g_micTestActive;
+                }
+                if (g_micTestActive) ImGui::PopStyleColor();
+                ImGui::EndDisabled();
 
-                // Mic Volume slider + VU Meter
-                ImGui::BeginDisabled(!state->record_microphone);
+                ImGui::BeginDisabled(!state->record_microphone && !g_micTestActive);
                 ImGui::SetNextItemWidth(slider_w);
                 int mic_pct = (int)(state->mic_volume * 100.0f + 0.5f);
                 char mic_vol_label[48];
@@ -1278,7 +1742,8 @@ void imgui_window_render_ui(UiState* state) {
                     state->action_settings_changed = true;
                 }
                 ImGui::SameLine();
-                ImGui::ProgressBar(state->record_microphone ? state->mic_audio_level : 0.0f, ImVec2(meter_w, 20), "");
+                float shown_mic = g_micTestActive ? g_micTestLevel : state->mic_audio_level;
+                draw_led_vu_meter("##MicMeter", shown_mic, state->record_microphone || g_micTestActive, meter_w, 22.0f);
                 ImGui::EndDisabled();
 
                 ImGui::Spacing();
@@ -1286,26 +1751,145 @@ void imgui_window_render_ui(UiState* state) {
                     state->action_settings_changed = true;
                 }
                 ImGui::SameLine();
-                if (ImGui::Checkbox(tr(lang, "Compressor", "Компресор", "压缩器", "Kompressor", "Compresseur", "Kompresor"), &state->mic_compressor)) {
+                if (ImGui::Checkbox(tr(lang, "Mic Comp.", "Комп. мікр.", "麦压缩", "Mikro-Komp.", "Comp. micro", "Komp. mikr."), &state->mic_compressor)) {
                     state->action_settings_changed = true;
                 }
                 ImGui::SameLine();
-                if (ImGui::Checkbox(tr(lang, "Multi-Track", "Мульти-трек", "多音轨", "Multi-Spur", "Multi-piste", "Wielościeżk."), &state->separate_audio_tracks)) {
+                if (ImGui::Checkbox(tr(lang, "Spk Night", "Нічн. режим", "夜间音平衡", "Nachtmodus", "Mode nuit", "Tryb nocny"), &state->sys_compressor)) {
                     state->action_settings_changed = true;
                 }
             }
             ImGui::EndChild();
             ImGui::PopStyleColor();
 
+            const char* filters_modal_title = tr(lang,
+                "Audio Filters & Effects###AudioFiltersModal",
+                "Аудіофільтри та ефекти###AudioFiltersModal",
+                "音频滤镜与效果###AudioFiltersModal",
+                "Audiofilter & Effekte###AudioFiltersModal",
+                "Filtres et Effets Audio###AudioFiltersModal",
+                "Filtry i Efekty Audio###AudioFiltersModal");
+            if (g_showAudioFiltersPopup) {
+                ImGui::OpenPopup(filters_modal_title);
+                g_showAudioFiltersPopup = false;
+            }
+            bool filters_modal_open = true;
+            if (ImGui::BeginPopupModal(filters_modal_title, &filters_modal_open, ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::PushItemWidth(260.0f);
+
+                ImGui::BeginDisabled(is_recording);
+                if (g_micTestActive) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f, 0.58f, 0.34f, 1.00f));
+                if (ImGui::Button(
+                        g_micTestActive
+                            ? tr(lang, "Stop Mic Monitor##PopT", "Зупинити тест мікрофона##PopT", "停止麦克风监听##PopT", "Mikro-Test stoppen##PopT", "Arrêter le test micro##PopT", "Zatrzymaj test mikr.##PopT")
+                            : tr(lang, "Test Mic (Hear Filters Live)##PopT", "Прослухати мікрофон (з фільтрами)##PopT", "实时试听麦克风效果##PopT", "Mikrofon live testen##PopT", "Tester le micro en direct##PopT", "Testuj mikrofon na żywo##PopT"),
+                        ImVec2(240.0f, 26.0f))) {
+                    g_micTestActive = !g_micTestActive;
+                }
+                if (g_micTestActive) ImGui::PopStyleColor();
+                ImGui::EndDisabled();
+                ImGui::SameLine();
+                float modal_mic = g_micTestActive ? g_micTestLevel : state->mic_audio_level;
+                draw_led_vu_meter("##ModalMicMeter", modal_mic, state->record_microphone || g_micTestActive, 150.0f, 26.0f);
+
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                ImGui::TextColored(ImVec4(0.24f, 0.66f, 1.00f, 1.00f), "%s",
+                    tr(lang, "Microphone DSP:", "Мікрофон (DSP):", "麦克风处理:", "Mikrofon-DSP:", "DSP Microphone :", "DSP Mikrofonu:"));
+                if (ImGui::Checkbox(tr(lang, "Noise Suppression (85Hz HP + Gate)##Pop", "Шумозаглушення (HP 85Гц + Гейт)##Pop", "噪声抑制##Pop", "Rauschunterdrückung##Pop", "Réduction du bruit##Pop", "Redukcja szumu##Pop"), &state->mic_noise_suppression)) {
+                    state->action_settings_changed = true;
+                }
+                if (state->mic_noise_suppression) {
+                    int ns_pct = (int)(state->mic_ns_strength * 100.0f + 0.5f);
+                    if (ImGui::SliderInt(tr(lang, "Suppression Strength##Pop", "Сила шумозаглушення##Pop", "抑制强度##Pop", "Unterdrückung##Pop", "Intensité##Pop", "Siła redukcji##Pop"), &ns_pct, 0, 100, "%d%%")) {
+                        state->mic_ns_strength = (float)ns_pct / 100.0f;
+                        state->action_settings_changed = true;
+                    }
+                }
+                if (ImGui::Checkbox(tr(lang, "Voice Compressor##Pop", "Компресор голосу##Pop", "语音压缩器##Pop", "Sprachkompressor##Pop", "Compresseur vocal##Pop", "Kompresor głosu##Pop"), &state->mic_compressor)) {
+                    state->action_settings_changed = true;
+                }
+                if (state->mic_compressor) {
+                    int comp_pct = (int)(state->mic_comp_amount * 100.0f + 0.5f);
+                    if (ImGui::SliderInt(tr(lang, "Compression Amount##Pop", "Ступінь компресії##Pop", "压缩量##Pop", "Kompressionsgrad##Pop", "Compression##Pop", "Kompresja##Pop"), &comp_pct, 0, 100, "%d%%")) {
+                        state->mic_comp_amount = (float)comp_pct / 100.0f;
+                        state->action_settings_changed = true;
+                    }
+                }
+                int mic_gdb = (int)(state->mic_gain_db + (state->mic_gain_db >= 0 ? 0.5f : -0.5f));
+                if (ImGui::SliderInt(tr(lang, "Mic Gain Boost##Pop", "Підсилення мікрофона##Pop", "麦克风增益##Pop", "Mikrofon-Verstärkung##Pop", "Gain micro##Pop", "Wzmocnienie mikr.##Pop"), &mic_gdb, -12, 24, "%d dB")) {
+                    state->mic_gain_db = (float)mic_gdb;
+                    state->action_settings_changed = true;
+                }
+
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                ImGui::TextColored(ImVec4(0.24f, 0.66f, 1.00f, 1.00f), "%s",
+                    tr(lang, "Speakers / System Audio DSP:", "Динаміки / Системний звук (DSP):", "扬声器 / 系统音频处理:", "Lautsprecher / Systemton-DSP:", "DSP Haut-parleurs / Système :", "DSP Głośników / Systemu:"));
+                ImGui::SameLine();
+                if (ImGui::SmallButton(tr(lang, "Test Speakers##PopSpk", "Тест динаміків##PopSpk", "测试扬声器##PopSpk", "Lautsprecher testen##PopSpk", "Tester haut-parleurs##PopSpk", "Testuj głośniki##PopSpk"))) {
+                    trigger_speaker_test(state->selected_audio_output, state->system_volume);
+                }
+                if (ImGui::Checkbox(tr(lang, "Clarity Filter (Sub-Rumble Cut)##Pop", "Фільтр чистоти (зріз низьких)##Pop", "清晰度滤波##Pop", "Klarheitsfilter##Pop", "Filtre clarté##Pop", "Filtr czystości##Pop"), &state->sys_clarity_filter)) {
+                    state->action_settings_changed = true;
+                }
+                if (ImGui::Checkbox(tr(lang, "Loudness Compressor (Night Mode)##Pop", "Компресор гучності (нічний режим)##Pop", "响度压缩器##Pop", "Lautheitskompressor##Pop", "Compresseur de niveau##Pop", "Kompresor głośności##Pop"), &state->sys_compressor)) {
+                    state->action_settings_changed = true;
+                }
+                if (state->sys_compressor) {
+                    int scomp_pct = (int)(state->sys_comp_amount * 100.0f + 0.5f);
+                    if (ImGui::SliderInt(tr(lang, "System Compression##Pop", "Ступінь компресії##Pop", "系统压缩量##Pop", "System-Kompression##Pop", "Compression système##Pop", "Kompresja systemu##Pop"), &scomp_pct, 0, 100, "%d%%")) {
+                        state->sys_comp_amount = (float)scomp_pct / 100.0f;
+                        state->action_settings_changed = true;
+                    }
+                }
+                int sys_gdb = (int)(state->sys_gain_db + (state->sys_gain_db >= 0 ? 0.5f : -0.5f));
+                if (ImGui::SliderInt(tr(lang, "System Gain Boost##Pop", "Підсилення системи##Pop", "系统增益##Pop", "System-Verstärkung##Pop", "Gain système##Pop", "Wzmocnienie syst.##Pop"), &sys_gdb, -12, 18, "%d dB")) {
+                    state->sys_gain_db = (float)sys_gdb;
+                    state->action_settings_changed = true;
+                }
+
+                ImGui::PopItemWidth();
+                ImGui::Spacing();
+                if (ImGui::Button(tr(lang, "Done##Filters", "Готово##Filters", "完成##Filters", "Fertig##Filters", "Terminé##Filters", "Gotowe##Filters"), ImVec2(140, 28))) {
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
+
+            const char* mixer_modal_title = tr(lang,
+                "Application Audio Mixer###AppMixerModal",
+                "Мікшер гучності програм###AppMixerModal",
+                "应用程序音量混合器###AppMixerModal",
+                "Anwendungs-Audiomixer###AppMixerModal",
+                "Mixeur Audio par Application###AppMixerModal",
+                "Mikser Głośności Aplikacji###AppMixerModal");
+            if (g_showAppMixerPopup) {
+                ImGui::OpenPopup(mixer_modal_title);
+                g_showAppMixerPopup = false;
+            }
+            bool mixer_modal_open = true;
+            if (ImGui::BeginPopupModal(mixer_modal_title, &mixer_modal_open, ImGuiWindowFlags_AlwaysAutoResize)) {
+                render_app_audio_mixer_ui(lang);
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+                if (ImGui::Button(tr(lang, "Done##AppMix", "Готово##AppMix", "完成##AppMix", "Fertig##AppMix", "Terminé##AppMix", "Gotowe##AppMix"), ImVec2(140, 28))) {
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
+
             ImGui::Spacing();
 
-            // ==========================================
-            // MIDDLE ROW: [3. OUTPUT & STORAGE]
-            // ==========================================
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.14f, 0.15f, 0.18f, 1.00f));
-            ImGui::BeginChild("QuickSettingsCard", ImVec2(total_w, h_row2), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.08f, 0.11f, 0.14f, 1.00f));
+            ImGui::BeginChild("QuickSettingsCard", ImVec2(total_w, h_row2), true);
             {
-                ImGui::TextColored(ImVec4(0.20f, 0.65f, 1.00f, 1.00f), "%s",
+                ImGui::TextColored(ImVec4(0.24f, 0.66f, 1.00f, 1.00f), "%s",
                     tr(lang,
                         "3. OUTPUT & STORAGE",
                         "3. ПАРАМЕТРИ ФАЙЛУ ТА ЗБЕРЕЖЕННЯ",
@@ -1314,41 +1898,44 @@ void imgui_window_render_ui(UiState* state) {
                         "3. SORTIE & STOCKAGE",
                         "3. PARAMETRY PLIKU I ZAPIS"));
                 ImGui::Spacing();
-                if (h_row2 > 160.0f) ImGui::Spacing();
 
                 float card_w = ImGui::GetContentRegionAvail().x;
-                float spacing_x = ImGui::GetStyle().ItemSpacing.x;
                 float col3_w = (card_w - (spacing_x * 2.0f)) / 3.0f;
+                float start_x = ImGui::GetCursorPosX();
 
-                // Column 1: Format
                 ImGui::TextDisabled("%s", tr(lang, "Format:", "Формат:", "格式:", "Format:", "Format :", "Format:"));
                 ImGui::SameLine();
-                const char* quick_formats[] = { "MKV (Crash-Resistant)", "MP4 (Universal)", "MOV" };
-                ImGui::SetNextItemWidth(col3_w - 65.0f);
-                if (ImGui::Combo("##QuickFormat", &state->container_format, quick_formats, 3)) {
+                const char* quick_formats[] = { "MKV", "MP4", "MOV", "WebM", "WMV", "FLV", "F4V", "AVCHD" };
+                float fmt_w = (start_x + col3_w) - ImGui::GetCursorPosX() - 4.0f;
+                if (fmt_w < 90.0f) fmt_w = 90.0f;
+                ImGui::SetNextItemWidth(fmt_w);
+                if (ImGui::Combo("##QuickFormat", &state->container_format, quick_formats, 8)) {
                     state->action_settings_changed = true;
                 }
 
-                // Column 2: Resolution
-                ImGui::SameLine(col3_w + spacing_x);
+                ImGui::SameLine(start_x + col3_w + spacing_x);
                 ImGui::TextDisabled("%s", tr(lang, "Quality:", "Якість:", "画质:", "Qualität:", "Qualité :", "Jakość:"));
                 ImGui::SameLine();
                 const char* quick_res[] = {
-                    tr(lang, "Native", "Рідна (Екран)", "原生 (屏幕)", "Nativ", "Natif", "Natywna"),
+                    tr(lang, "Native", "Рідна", "原生", "Nativ", "Natif", "Natywna"),
                     "1080p (Full HD)",
                     "720p (HD)",
                     "480p (SD)"
                 };
-                ImGui::SetNextItemWidth(col3_w - 65.0f);
+                float res_w = (start_x + col3_w * 2.0f + spacing_x) - ImGui::GetCursorPosX() - 4.0f;
+                if (res_w < 90.0f) res_w = 90.0f;
+                ImGui::SetNextItemWidth(res_w);
                 if (ImGui::Combo("##QuickRes", &state->output_resolution, quick_res, 4)) {
                     state->action_settings_changed = true;
                 }
 
-                // Column 3: FPS Slider (from 10 to Monitor Refresh Rate) + 1-Click Eco 30 FPS Mode
-                ImGui::SameLine((col3_w + spacing_x) * 2.0f);
+                ImGui::SameLine(start_x + (col3_w + spacing_x) * 2.0f);
                 ImGui::TextDisabled("FPS:");
                 ImGui::SameLine();
-                ImGui::SetNextItemWidth(col3_w * 0.52f);
+                float eco_w = 78.0f;
+                float fps_w = (start_x + card_w) - ImGui::GetCursorPosX() - eco_w - spacing_x;
+                if (fps_w < 75.0f) fps_w = 75.0f;
+                ImGui::SetNextItemWidth(fps_w);
                 if (ImGui::SliderInt("##QuickFps", &state->target_fps, 10, max_hz, "%d FPS")) {
                     if (state->target_fps < 10) state->target_fps = 10;
                     if (state->target_fps > max_hz) state->target_fps = max_hz;
@@ -1357,19 +1944,17 @@ void imgui_window_render_ui(UiState* state) {
                 ImGui::SameLine();
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f, 0.48f, 0.30f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.60f, 0.38f, 1.0f));
-                if (ImGui::Button("Eco 30FPS", ImVec2(col3_w * 0.32f, 24))) {
+                if (ImGui::Button("Eco 30", ImVec2(eco_w, 24))) {
                     state->target_fps = (30 <= max_hz) ? 30 : max_hz;
-                    state->encoder_preset = 0; // Ultrafast
-                    state->rate_control = 2;   // CQP
+                    state->encoder_preset = 0;
+                    state->rate_control = 2;
                     state->quality_cqp = 23;
                     state->action_settings_changed = true;
                 }
                 ImGui::PopStyleColor(2);
 
                 ImGui::Spacing();
-                if (h_row2 > 160.0f) ImGui::Spacing();
 
-                // Destination Folder Row
                 ImGui::TextDisabled("%s", tr(lang, "Folder:", "Папка:", "目录:", "Ordner:", "Dossier :", "Folder:"));
                 ImGui::SameLine();
 
@@ -1397,22 +1982,16 @@ void imgui_window_render_ui(UiState* state) {
 
             ImGui::Spacing();
 
-            // ==========================================
-            // LOWER-MIDDLE ROW: [4. ACTION DECK & TELEMETRY]
-            // ==========================================
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.12f, 0.13f, 0.15f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.07f, 0.09f, 0.12f, 1.00f));
             ImGui::BeginChild("ActionCard", ImVec2(total_w, h_row3), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
             {
-                ImGui::Spacing();
-                if (h_row3 > 200.0f) ImGui::Spacing();
-
-                // Big Centered Action Buttons
-                float btn_h = (h_row3 > 220.0f) ? 54.0f : 46.0f;
+                float a_inner_w = ImGui::GetContentRegionAvail().x;
+                float btn_h = (h_row3 > 200.0f) ? 48.0f : 42.0f;
                 if (!is_recording) {
                     ImGui::SetCursorPosX((total_w - 420.0f) * 0.5f);
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.88f, 0.14f, 0.24f, 1.00f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.96f, 0.22f, 0.32f, 1.00f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.74f, 0.10f, 0.18f, 1.00f));
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.86f, 0.16f, 0.25f, 1.00f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.95f, 0.24f, 0.33f, 1.00f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.72f, 0.12f, 0.20f, 1.00f));
                     if (ImGui::Button(
                         tr(lang,
                             "START RECORDING (F9)",
@@ -1453,7 +2032,6 @@ void imgui_window_render_ui(UiState* state) {
 
                 ImGui::Spacing();
 
-                // Big Centered Timer & Status
                 char time_buf[32];
                 format_duration(state->duration_sec, time_buf, sizeof(time_buf));
                 char timer_text[128];
@@ -1465,46 +2043,29 @@ void imgui_window_render_ui(UiState* state) {
                         : tr(lang, "[READY]", "[ГОТОВИЙ ДО ЗАПИСУ]", "[准备就绪]", "[AUFNAHMEBEREIT]", "[PRÊT À ENREGISTRER]", "[GOTOWY DO NAGRYWANIA]"));
                 ImVec2 t_sz = ImGui::CalcTextSize(timer_text);
                 ImGui::SetCursorPosX((total_w - t_sz.x) * 0.5f);
-                ImGui::TextColored(is_recording ? ImVec4(1.0f, 0.3f, 0.3f, 1.0f) : ImVec4(0.4f, 0.85f, 1.0f, 1.0f), "%s", timer_text);
+                ImGui::TextColored(is_recording ? ImVec4(1.0f, 0.32f, 0.32f, 1.0f) : ImVec4(0.40f, 0.85f, 1.0f, 1.0f), "%s", timer_text);
 
                 ImGui::Spacing();
                 ImGui::Separator();
                 ImGui::Spacing();
 
-                // Live Telemetry Tiles (4 distinct stylish badges)
-                float tile_w = (total_w - 48.0f) / 4.0f;
-                float tile_h = (h_row3 > 220.0f) ? 40.0f : 32.0f;
+                float tile_w = (a_inner_w - spacing_x * 3.0f) / 4.0f;
+                float tile_h = (h_row3 > 200.0f) ? 40.0f : 34.0f;
                 double mb = (double)state->file_bytes / (1024.0 * 1024.0);
 
-                char b1[64], b2[64], b3[64], b4[64];
-                snprintf(b1, sizeof(b1), "%s: %.1f MB", tr(lang, "Size", "Розмір", "大小", "Größe", "Taille", "Rozmiar"), mb);
-                snprintf(b2, sizeof(b2), "%s: %u kbps", tr(lang, "Bitrate", "Бітрейт", "码率", "Bitrate", "Débit", "Bitrate"), state->bitrate_kbps);
-                snprintf(b3, sizeof(b3), "FPS: %.1f / %d", state->current_fps, state->target_fps);
-                snprintf(b4, sizeof(b4), "%s: %llu", tr(lang, "Dropped", "Пропущено", "丢帧", "Verworfen", "Perdues", "Pominięto"), (unsigned long long)state->dropped_frames);
+                char v1[48], v2[48], v3[48], v4[48];
+                snprintf(v1, sizeof(v1), "%.1f MB", mb);
+                snprintf(v2, sizeof(v2), "%u kbps", state->bitrate_kbps);
+                snprintf(v3, sizeof(v3), "%.1f / %d", state->current_fps, state->target_fps);
+                snprintf(v4, sizeof(v4), "%llu", (unsigned long long)state->dropped_frames);
 
-                const char* tile_texts[] = { b1, b2, b3, b4 };
-                ImVec4 tile_colors[] = {
-                    ImVec4(0.3f, 0.75f, 1.0f, 1.0f),
-                    ImVec4(0.3f, 0.85f, 0.45f, 1.0f),
-                    ImVec4(1.0f, 0.85f, 0.35f, 1.0f),
-                    (state->dropped_frames > 0) ? ImVec4(1.0f, 0.35f, 0.35f, 1.0f) : ImVec4(0.6f, 0.65f, 0.75f, 1.0f)
-                };
-
-                for (int t = 0; t < 4; t++) {
-                    if (t > 0) ImGui::SameLine();
-                    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.16f, 0.17f, 0.20f, 0.80f));
-                    char tile_id[32];
-                    snprintf(tile_id, sizeof(tile_id), "TelemetryTile%d", t);
-                    ImGui::BeginChild(tile_id, ImVec2(tile_w, tile_h), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-                    {
-                        ImVec2 sz = ImGui::CalcTextSize(tile_texts[t]);
-                        ImGui::SetCursorPosX((tile_w - sz.x) * 0.5f);
-                        ImGui::SetCursorPosY((tile_h - sz.y) * 0.5f);
-                        ImGui::TextColored(tile_colors[t], "%s", tile_texts[t]);
-                    }
-                    ImGui::EndChild();
-                    ImGui::PopStyleColor();
-                }
+                draw_telemetry_badge("tel_size", tr(lang, "Size", "Розмір", "大小", "Größe", "Taille", "Rozmiar"), v1, ImVec4(0.28f, 0.72f, 1.00f, 1.0f), tile_w, tile_h);
+                ImGui::SameLine();
+                draw_telemetry_badge("tel_br", tr(lang, "Bitrate", "Бітрейт", "码率", "Bitrate", "Débit", "Bitrate"), v2, ImVec4(0.25f, 0.85f, 0.48f, 1.0f), tile_w, tile_h);
+                ImGui::SameLine();
+                draw_telemetry_badge("tel_fps", "FPS", v3, ImVec4(0.98f, 0.82f, 0.28f, 1.0f), tile_w, tile_h);
+                ImGui::SameLine();
+                draw_telemetry_badge("tel_drop", tr(lang, "Dropped", "Пропущено", "丢帧", "Verworfen", "Perdues", "Pominięto"), v4, (state->dropped_frames > 0) ? ImVec4(0.98f, 0.32f, 0.32f, 1.0f) : ImVec4(0.55f, 0.65f, 0.78f, 1.0f), tile_w, tile_h);
             }
             ImGui::EndChild();
             ImGui::PopStyleColor();
@@ -1676,7 +2237,7 @@ void imgui_window_render_ui(UiState* state) {
                                 if ((state->encoder_caps_mask & (1 << 6)) != 0) {
                                     state->encoder_choice = 0;
                                     state->qsv_low_power = true;
-                                    state->qsv_async_depth = 1;
+                                    state->qsv_async_depth = 4;
                                 } else if ((state->encoder_caps_mask & (1 << 11)) != 0) {
                                     state->encoder_choice = 4;
                                     state->wmf_hw_encoding = true;
@@ -2359,6 +2920,73 @@ tr(lang, "MOV (*.mov - Video Editing / QuickTime)", "MOV (*.mov - Монтаж �
                             }
                         }
 
+                        ImGui::Spacing();
+                        ImGui::Separator();
+                        ImGui::Spacing();
+
+                        ImGui::TextColored(ImVec4(0.80f, 0.85f, 0.95f, 1.00f), "%s",
+                            tr(lang,
+                                "Speakers / System Audio Filters:",
+                                "Фільтри динаміків / системного звуку:",
+                                "扬声器 / 系统音频滤镜:",
+                                "Lautsprecher / Systemton-Filter:",
+                                "Filtres haut-parleurs / système :",
+                                "Filtry głośników / systemu:"));
+                        ImGui::Spacing();
+
+                        if (ImGui::Checkbox(
+                            tr(lang,
+                                "Clarity Filter (Sub-Rumble Cut)",
+                                "Фільтр чистоти (зріз низького гулу)",
+                                "清晰度滤波 (切除低频轰鸣)",
+                                "Klarheitsfilter (Sub-Bass-Cut)",
+                                "Filtre de clarté (Coupe-bas)",
+                                "Filtr czystości (Odcięcie basu)"),
+                            &state->sys_clarity_filter)) {
+                            state->action_settings_changed = true;
+                        }
+                        if (ImGui::Checkbox(
+                            tr(lang,
+                                "Loudness Compressor (Night Mode)",
+                                "Компресор гучності (вирівнює вибухи та діалоги)",
+                                "响度压缩器 (夜间模式)",
+                                "Lautheitskompressor (Nachtmodus)",
+                                "Compresseur de niveau (Mode nuit)",
+                                "Kompresor głośności (Tryb nocny)"),
+                            &state->sys_compressor)) {
+                            state->action_settings_changed = true;
+                        }
+                        if (state->sys_compressor) {
+                            int scomp_pct = (int)(state->sys_comp_amount * 100.0f + 0.5f);
+                            if (ImGui::SliderInt(
+                                tr(lang,
+                                    "System Compression (%)",
+                                    "Ступінь компресії системи (%)",
+                                    "系统压缩量 (%)",
+                                    "System-Kompression (%)",
+                                    "Compression système (%)",
+                                    "Kompresja systemu (%)"),
+                                &scomp_pct, 0, 100, "%d%%")) {
+                                state->sys_comp_amount = (float)scomp_pct / 100.0f;
+                                state->action_settings_changed = true;
+                            }
+                        }
+                        {
+                            int sgain_db = (int)(state->sys_gain_db + (state->sys_gain_db >= 0 ? 0.5f : -0.5f));
+                            if (ImGui::SliderInt(
+                                tr(lang,
+                                    "System Volume Boost (dB)",
+                                    "Підсилення системи (дБ)",
+                                    "系统音量增益 (分贝)",
+                                    "System-Verstärkung (dB)",
+                                    "Gain système (dB)",
+                                    "Wzmocnienie systemu (dB)"),
+                                &sgain_db, -12, 18, "%d dB")) {
+                                state->sys_gain_db = (float)sgain_db;
+                                state->action_settings_changed = true;
+                            }
+                        }
+
                         // Separate Tracks
                         if (ImGui::Checkbox(
                             tr(lang,
@@ -2536,14 +3164,6 @@ tr(lang, "MOV (*.mov - Video Editing / QuickTime)", "MOV (*.mov - Монтаж �
 
     ImGui::End();
 
-        if (g_showAppMixerPopup) {
-        ImGui::SetNextWindowSize(ImVec2(520.0f, 340.0f), ImGuiCond_FirstUseEver);
-        if (ImGui::Begin(tr(lang, "Application Audio Mixer", "Мікшер гучності додатків", "应用程序音量混合器", "Anwendungs-Audiomixer", "Mixeur audio des applications", "Mikser audio aplikacji"), &g_showAppMixerPopup)) {
-            render_app_audio_mixer_ui(lang);
-        }
-        ImGui::End();
-    }
-
     bool should_enable_preview = preview_tab_active && !g_previewPaused && !(g_hWnd && IsIconic(g_hWnd));
     if (!should_enable_preview && g_previewEnabled) {
         if (g_previewCsInit) EnterCriticalSection(&g_previewCs);
@@ -2589,6 +3209,12 @@ void imgui_window_get_size(int* out_width, int* out_height) {
 }
 
 void imgui_window_destroy(void) {
+    if (g_micTestThread) {
+        InterlockedExchange(&g_micTestRunning, 0);
+        WaitForSingleObject(g_micTestThread, 500);
+        CloseHandle(g_micTestThread);
+        g_micTestThread = NULL;
+    }
     if (g_hOverlayWnd) {
         DestroyWindow(g_hOverlayWnd);
         g_hOverlayWnd = NULL;

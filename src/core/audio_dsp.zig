@@ -356,6 +356,92 @@ pub const VoiceChain = struct {
     }
 };
 
+pub const SystemChain = struct {
+    sample_rate: f32 = 48000.0,
+    high_pass: HighPass,
+    compressor: Compressor,
+    gain_linear: f32 = 1.0,
+    volume_multiplier: f32 = 1.0,
+
+    pub fn init(sample_rate: f32) SystemChain {
+        const sr = if (sample_rate > 1000.0) sample_rate else 48000.0;
+        var hp = HighPass.init(sr, 35.0);
+        hp.enabled = false;
+        var comp = Compressor.init(sr, -18.0, 3.0);
+        comp.env_db = 0.0;
+        comp.enabled = false;
+
+        return SystemChain{
+            .sample_rate = sr,
+            .high_pass = hp,
+            .compressor = comp,
+            .gain_linear = 1.0,
+            .volume_multiplier = 1.0,
+        };
+    }
+
+    pub fn configureSystemChain(
+        self: *SystemChain,
+        sample_rate: f32,
+        clarity_hp: bool,
+        compressor_enabled: bool,
+        comp_amount: f32,
+        gain_db: f32,
+        volume: f32,
+    ) void {
+        const sr = if (sample_rate > 1000.0) sample_rate else 48000.0;
+        if (@abs(sr - self.sample_rate) > 1.0) {
+            self.high_pass = HighPass.init(sr, 35.0);
+            self.sample_rate = sr;
+        }
+        self.high_pass.enabled = clarity_hp;
+        self.compressor.configureFromAmount(sr, comp_amount, compressor_enabled);
+        self.gain_linear = dbToLinear(math.clamp(gain_db, -12.0, 18.0));
+        self.volume_multiplier = math.clamp(volume, 0.0, 4.0);
+    }
+
+    pub fn processBuffer(self: *SystemChain, samples: []f32, channels: u32) void {
+        if (samples.len == 0 or channels == 0) return;
+
+        self.high_pass.processBuffer(samples, channels);
+        self.compressor.processBuffer(samples, channels);
+
+        const total_scale = self.gain_linear * self.volume_multiplier;
+        for (samples) |*s| {
+            const v = s.* * total_scale;
+            s.* = VoiceChain.softLimit(v);
+        }
+    }
+};
+
+var g_test_voice_chain: VoiceChain = VoiceChain.init(48000.0);
+
+pub export fn lifescreen_dsp_test_mic_process(
+    samples: [*]f32,
+    frame_count: u32,
+    channels: u32,
+    sample_rate: f32,
+    noise_suppression: bool,
+    ns_strength: f32,
+    compressor: bool,
+    comp_amount: f32,
+    gain_db: f32,
+    volume: f32,
+) callconv(.c) void {
+    const total = @as(usize, frame_count) * @as(usize, channels);
+    if (total == 0) return;
+    g_test_voice_chain.configureMicChain(
+        sample_rate,
+        noise_suppression,
+        ns_strength,
+        compressor,
+        comp_amount,
+        gain_db,
+        volume,
+    );
+    g_test_voice_chain.processBuffer(samples[0..total], channels);
+}
+
 test "HighPass attenuates DC and 20Hz while passing 1kHz" {
     const sr: f32 = 48000.0;
     var hp = HighPass.init(sr, 85.0);

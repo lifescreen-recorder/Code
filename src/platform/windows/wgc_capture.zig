@@ -21,7 +21,8 @@ extern fn wgc_capture_destroy(cap: ?*anyopaque) callconv(.c) void;
 pub const WgcCapture = struct {
     handle: *anyopaque,
     d3d: d3d11.D3D11Context,
-    dest_texture: *d3d11.ID3D11Texture2D,
+    dest_textures: [4]*d3d11.ID3D11Texture2D,
+    tex_index: usize = 0,
     width: u32,
     height: u32,
     frame_count: u64 = 0,
@@ -33,12 +34,14 @@ pub const WgcCapture = struct {
             .Format = d3d11.DXGI_FORMAT_B8G8R8A8_UNORM,
             .Usage = d3d11.D3D11_USAGE_DEFAULT,
             .BindFlags = d3d11.D3D11_BIND_RENDER_TARGET | d3d11.D3D11_BIND_SHADER_RESOURCE,
-            .MiscFlags = 0x2, // D3D11_RESOURCE_MISC_SHARED
+            .MiscFlags = 0x2,
         };
 
-        const new_tex = try self.d3d.device.createTexture2D(&tex_desc);
-        _ = self.dest_texture.release();
-        self.dest_texture = new_tex;
+        for (0..4) |i| {
+            const new_tex = try self.d3d.device.createTexture2D(&tex_desc);
+            _ = self.dest_textures[i].release();
+            self.dest_textures[i] = new_tex;
+        }
         self.width = new_w;
         self.height = new_h;
     }
@@ -77,12 +80,20 @@ pub const WgcCapture = struct {
             .MiscFlags = 0x2, // D3D11_RESOURCE_MISC_SHARED
         };
 
-        const dest_tex = try d3d_ctx.device.createTexture2D(&tex_desc);
+        var dest_texs: [4]*d3d11.ID3D11Texture2D = undefined;
+        var created_cnt: usize = 0;
+        errdefer for (0..created_cnt) |i| {
+            _ = dest_texs[i].release();
+        };
+        for (0..4) |i| {
+            dest_texs[i] = try d3d_ctx.device.createTexture2D(&tex_desc);
+            created_cnt += 1;
+        }
 
         return .{
             .handle = handle.?,
             .d3d = d3d_ctx,
-            .dest_texture = dest_tex,
+            .dest_textures = dest_texs,
             .width = actual_w,
             .height = actual_h,
         };
@@ -118,12 +129,20 @@ pub const WgcCapture = struct {
             .MiscFlags = 0x2,
         };
 
-        const dest_tex = try d3d_ctx.device.createTexture2D(&tex_desc);
+        var dest_texs: [4]*d3d11.ID3D11Texture2D = undefined;
+        var created_cnt: usize = 0;
+        errdefer for (0..created_cnt) |i| {
+            _ = dest_texs[i].release();
+        };
+        for (0..4) |i| {
+            dest_texs[i] = try d3d_ctx.device.createTexture2D(&tex_desc);
+            created_cnt += 1;
+        }
 
         return .{
             .handle = handle.?,
             .d3d = d3d_ctx,
-            .dest_texture = dest_tex,
+            .dest_textures = dest_texs,
             .width = actual_w,
             .height = actual_h,
         };
@@ -133,12 +152,15 @@ pub const WgcCapture = struct {
         var w: u32 = self.width;
         var h: u32 = self.height;
 
-        const ok = wgc_capture_acquire_frame(self.handle, @ptrCast(self.dest_texture), timeout_ms, &w, &h);
+        const tex = self.dest_textures[self.tex_index];
+        const ok = wgc_capture_acquire_frame(self.handle, @ptrCast(tex), timeout_ms, &w, &h);
         if ((w != self.width or h != self.height) and w > 0 and h > 0) {
             try self.recreateDestTexture(w, h);
         }
         if (!ok) return null;
 
+        const out_tex = self.dest_textures[self.tex_index];
+        self.tex_index = (self.tex_index + 1) % 4;
         self.width = w;
         self.height = h;
         self.frame_count += 1;
@@ -149,13 +171,15 @@ pub const WgcCapture = struct {
             .format = .bgra32,
             .pts_nanos = pts_nanos,
             .frame_index = self.frame_count,
-            .gpu_texture_ptr = @ptrCast(self.dest_texture),
+            .gpu_texture_ptr = @ptrCast(out_tex),
         };
     }
 
     pub fn deinit(self: *WgcCapture) void {
         wgc_capture_destroy(self.handle);
-        _ = self.dest_texture.release();
+        for (self.dest_textures) |tex| {
+            _ = tex.release();
+        }
         self.d3d.deinit();
     }
 };

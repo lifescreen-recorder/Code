@@ -364,7 +364,8 @@ fn getAdapterName(adapter: *IDXGIAdapter1, buf: *[128]u8) []const u8 {
 pub const DxgiCapture = struct {
     d3d: d3d11.D3D11Context,
     duplication: *IDXGIOutputDuplication,
-    dest_texture: *d3d11.ID3D11Texture2D,
+    dest_textures: [4]*d3d11.ID3D11Texture2D,
+    tex_index: usize = 0,
     desktop_handle: ?*anyopaque = null,
     width: u32,
     height: u32,
@@ -481,19 +482,27 @@ pub const DxgiCapture = struct {
                     .MiscFlags = 0x2, // D3D11_RESOURCE_MISC_SHARED
                 };
 
-                var dest_tex: *d3d11.ID3D11Texture2D = undefined;
-                if (d3d_ctx.device.createTexture2D(&tex_desc)) |tex| {
-                    dest_tex = tex;
-                } else |err| {
-                    _ = duplication.?.release();
-                    d3d_ctx.deinit();
-                    return err;
+                var dest_texs: [4]*d3d11.ID3D11Texture2D = undefined;
+                var created_cnt: usize = 0;
+                errdefer for (0..created_cnt) |i| {
+                    _ = dest_texs[i].release();
+                };
+                for (0..4) |i| {
+                    dest_texs[i] = d3d_ctx.device.createTexture2D(&tex_desc) catch |err| {
+                        for (0..created_cnt) |j| {
+                            _ = dest_texs[j].release();
+                        }
+                        _ = duplication.?.release();
+                        d3d_ctx.deinit();
+                        return err;
+                    };
+                    created_cnt += 1;
                 }
 
                 return .{
                     .d3d = d3d_ctx,
                     .duplication = duplication.?,
-                    .dest_texture = dest_tex,
+                    .dest_textures = dest_texs,
                     .desktop_handle = input_desk,
                     .width = width,
                     .height = height,
@@ -518,7 +527,8 @@ pub const DxgiCapture = struct {
         if ((ci.flags & 1) == 0 or ci.hCursor == null) return; // 1 = CURSOR_SHOWING
 
         var surf_ptr: ?*anyopaque = null;
-        if (self.dest_texture.vtable.base.base.QueryInterface(@ptrCast(self.dest_texture), &IID_IDXGISurface1, &surf_ptr) != S_OK or surf_ptr == null) {
+        const cur_tex = self.dest_textures[self.tex_index];
+        if (cur_tex.vtable.base.base.QueryInterface(@ptrCast(cur_tex), &IID_IDXGISurface1, &surf_ptr) != S_OK or surf_ptr == null) {
             return;
         }
         const surf: *IDXGISurface1 = @ptrCast(@alignCast(surf_ptr.?));
@@ -568,8 +578,9 @@ pub const DxgiCapture = struct {
         const acquired_tex: *d3d11.ID3D11Texture2D = @ptrCast(@alignCast(acquired_tex_ptr.?));
         defer _ = acquired_tex.release();
 
-        // GPU-to-GPU Direct copy (Hardware blit)
-        self.d3d.context.copyResource(@ptrCast(self.dest_texture), @ptrCast(acquired_tex));
+        const out_tex = self.dest_textures[self.tex_index];
+        self.d3d.context.copyResource(@ptrCast(out_tex), @ptrCast(acquired_tex));
+        self.tex_index = (self.tex_index + 1) % 4;
 
         self.frame_count += 1;
         return types.VideoFrame{
@@ -578,12 +589,14 @@ pub const DxgiCapture = struct {
             .format = .bgra32,
             .pts_nanos = pts_nanos,
             .frame_index = self.frame_count,
-            .gpu_texture_ptr = @ptrCast(self.dest_texture),
+            .gpu_texture_ptr = @ptrCast(out_tex),
         };
     }
 
     pub fn deinit(self: *DxgiCapture) void {
-        _ = self.dest_texture.release();
+        for (self.dest_textures) |tex| {
+            _ = tex.release();
+        }
         _ = self.duplication.release();
         self.d3d.deinit();
         if (self.desktop_handle) |desk| {

@@ -131,6 +131,11 @@ typedef struct {
     bool mic_compressor;
     float mic_comp_amount;
     float mic_gain_db;
+
+    bool sys_clarity_filter;
+    bool sys_compressor;
+    float sys_comp_amount;
+    float sys_gain_db;
 } UiState;
 
 // Native Win32 Window & DX11 LifeCycle

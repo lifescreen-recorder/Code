@@ -41,6 +41,8 @@ pub fn validateAndSanitize(cfg: *config.Config) void {
     cfg.audio.mic_ns_strength = std.math.clamp(cfg.audio.mic_ns_strength, 0.0, 1.0);
     cfg.audio.mic_comp_amount = std.math.clamp(cfg.audio.mic_comp_amount, 0.0, 1.0);
     cfg.audio.mic_gain_db = std.math.clamp(cfg.audio.mic_gain_db, -12.0, 24.0);
+    cfg.audio.sys_comp_amount = std.math.clamp(cfg.audio.sys_comp_amount, 0.0, 1.0);
+    cfg.audio.sys_gain_db = std.math.clamp(cfg.audio.sys_gain_db, -12.0, 18.0);
 
     // 5. Output validation
     if (cfg.output.filename_pattern.len == 0) {

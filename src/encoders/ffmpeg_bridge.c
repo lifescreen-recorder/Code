@@ -410,10 +410,11 @@ VideoEncoderContext* ffmpeg_encoder_create(const VideoEncoderConfig *cfg, Packet
         av_opt_set(ctx->codec_ctx->priv_data, "tune", "ull", 0);
         av_opt_set(ctx->codec_ctx->priv_data, "zerolatency", "1", 0);
     } else if (strstr(encoder_name, "qsv")) {
-        av_opt_set(ctx->codec_ctx->priv_data, "preset", cfg->low_end_mode ? "medium" : preset_val, 0);
+        av_opt_set(ctx->codec_ctx->priv_data, "preset", cfg->low_end_mode ? "veryfast" : preset_val, 0);
         av_opt_set(ctx->codec_ctx->priv_data, "low_power", (cfg->qsv_low_power || cfg->low_end_mode) ? "1" : "0", 0);
+        uint32_t async_d = (cfg->qsv_async_depth >= 2) ? cfg->qsv_async_depth : 4;
         char depth_buf[8];
-        snprintf(depth_buf, sizeof(depth_buf), "%u", cfg->low_end_mode ? 1 : (cfg->qsv_async_depth ? cfg->qsv_async_depth : 1));
+        snprintf(depth_buf, sizeof(depth_buf), "%u", async_d);
         av_opt_set(ctx->codec_ctx->priv_data, "async_depth", depth_buf, 0);
         av_opt_set(ctx->codec_ctx->priv_data, "look_ahead", "0", 0);
         av_opt_set(ctx->codec_ctx->priv_data, "forced_idr", "1", 0);
@@ -525,7 +526,12 @@ VideoEncoderContext* ffmpeg_encoder_create(const VideoEncoderConfig *cfg, Packet
         ctx->staging_count = 0;
     }
 
-    if (avcodec_open2(ctx->codec_ctx, codec, NULL) < 0) {
+    int open_ret = avcodec_open2(ctx->codec_ctx, codec, NULL);
+    if (open_ret < 0 && strstr(encoder_name, "qsv")) {
+        av_opt_set(ctx->codec_ctx->priv_data, "low_power", "0", 0);
+        open_ret = avcodec_open2(ctx->codec_ctx, codec, NULL);
+    }
+    if (open_ret < 0) {
         if (is_hw) {
             fprintf(stderr, "[FFmpeg] Hardware encoder '%s' failed to open. Falling back to software libx264...\n", encoder_name);
             avcodec_free_context(&ctx->codec_ctx);
@@ -615,7 +621,7 @@ static void drain_encoder_packets(VideoEncoderContext *ctx) {
 }
 
 static int64_t get_next_monotonic_pts(VideoEncoderContext *ctx, int64_t pts_nanos) {
-    int64_t pts = (int64_t)((double)pts_nanos / 1e9 * (double)ctx->fps + 0.5);
+    int64_t pts = (int64_t)((double)pts_nanos / 1e9 * (double)ctx->fps + 0.1);
     if (pts <= ctx->last_pts) {
         pts = ctx->last_pts + 1;
     }
@@ -993,12 +999,30 @@ static void update_cursor_cache(HCURSOR cur) {
     if (ii.hbmColor) DeleteObject(ii.hbmColor);
 }
 
-static void draw_cursor_onto_frame(VideoEncoderContext *ctx) {
+typedef struct {
+    int valid;
+    int x;
+    int y;
+    int max_x;
+    int max_y;
+    int uv_x0;
+    int uv_y0;
+    int uv_x1;
+    int uv_y1;
+    int is_nv12;
+    uint8_t y_plane[32][32];
+    uint8_t u_plane[17][17];
+    uint8_t v_plane[17][17];
+    uint8_t uv_plane[17][34];
+} CursorPatchBackup;
+
+static void draw_cursor_onto_frame(VideoEncoderContext *ctx, CursorPatchBackup *backup) {
+    if (backup) backup->valid = 0;
     if (!ctx || !ctx->sw_frame || !ctx->sw_frame->data[0]) return;
 
     CURSORINFO ci = { sizeof(CURSORINFO) };
     if (!GetCursorInfo(&ci)) return;
-    if (!(ci.flags & 1) || !ci.hCursor) return; // 1 = CURSOR_SHOWING
+    if (!(ci.flags & 1) || !ci.hCursor) return;
 
     if (ci.hCursor != s_cached_cursor || !s_has_cursor) {
         update_cursor_cache(ci.hCursor);
@@ -1014,6 +1038,12 @@ static void draw_cursor_onto_frame(VideoEncoderContext *ctx) {
     }
 
     if (cur_x + 32 <= 0 || cur_y + 32 <= 0 || cur_x >= (int)ctx->width || cur_y >= (int)ctx->height) return;
+
+    int min_tx = (cur_x < 0) ? 0 : cur_x;
+    int min_ty = (cur_y < 0) ? 0 : cur_y;
+    int max_tx = (cur_x + 31 >= (int)ctx->width) ? ((int)ctx->width - 1) : (cur_x + 31);
+    int max_ty = (cur_y + 31 >= (int)ctx->height) ? ((int)ctx->height - 1) : (cur_y + 31);
+    if (min_tx > max_tx || min_ty > max_ty) return;
 
     int full_range = (ctx->codec_ctx->color_range == AVCOL_RANGE_JPEG) ? 1 : 0;
     const int yr = full_range ? 54 : 47;
@@ -1031,8 +1061,58 @@ static void draw_cursor_onto_frame(VideoEncoderContext *ctx) {
 
     uint8_t *dst_y = ctx->sw_frame->data[0];
     uint32_t stride_y = (uint32_t)ctx->sw_frame->linesize[0];
-
     enum AVPixelFormat fmt = ctx->codec_ctx->pix_fmt;
+
+    if (backup) {
+        backup->valid = 1;
+        backup->x = min_tx;
+        backup->y = min_ty;
+        backup->max_x = max_tx;
+        backup->max_y = max_ty;
+        backup->uv_x0 = min_tx / 2;
+        backup->uv_y0 = min_ty / 2;
+        backup->uv_x1 = max_tx / 2;
+        backup->uv_y1 = max_ty / 2;
+        backup->is_nv12 = (fmt == AV_PIX_FMT_NV12) ? 1 : 0;
+
+        for (int ty = min_ty; ty <= max_ty; ty++) {
+            int by = ty - min_ty;
+            uint8_t *row_y = dst_y + ty * stride_y;
+            for (int tx = min_tx; tx <= max_tx; tx++) {
+                backup->y_plane[by][tx - min_tx] = row_y[tx];
+            }
+        }
+
+        if (backup->is_nv12) {
+            uint8_t *dst_uv = ctx->sw_frame->data[1];
+            uint32_t stride_uv = (uint32_t)ctx->sw_frame->linesize[1];
+            for (int uy = backup->uv_y0; uy <= backup->uv_y1; uy++) {
+                int buy = uy - backup->uv_y0;
+                uint8_t *row_uv = dst_uv + uy * stride_uv;
+                for (int ux = backup->uv_x0; ux <= backup->uv_x1; ux++) {
+                    int bux = (ux - backup->uv_x0) * 2;
+                    backup->uv_plane[buy][bux] = row_uv[ux * 2];
+                    backup->uv_plane[buy][bux + 1] = row_uv[ux * 2 + 1];
+                }
+            }
+        } else {
+            uint8_t *dst_u = ctx->sw_frame->data[1];
+            uint32_t stride_u = (uint32_t)ctx->sw_frame->linesize[1];
+            uint8_t *dst_v = ctx->sw_frame->data[2];
+            uint32_t stride_v = (uint32_t)ctx->sw_frame->linesize[2];
+            for (int uy = backup->uv_y0; uy <= backup->uv_y1; uy++) {
+                int buy = uy - backup->uv_y0;
+                uint8_t *row_u = dst_u + uy * stride_u;
+                uint8_t *row_v = dst_v + uy * stride_v;
+                for (int ux = backup->uv_x0; ux <= backup->uv_x1; ux++) {
+                    int bux = ux - backup->uv_x0;
+                    backup->u_plane[buy][bux] = row_u[ux];
+                    backup->v_plane[buy][bux] = row_v[ux];
+                }
+            }
+        }
+    }
+
     if (fmt == AV_PIX_FMT_NV12) {
         uint8_t *dst_uv = ctx->sw_frame->data[1];
         uint32_t stride_uv = (uint32_t)ctx->sw_frame->linesize[1];
@@ -1064,7 +1144,6 @@ static void draw_cursor_onto_frame(VideoEncoderContext *ctx) {
                     *py = (uint8_t)((y_val * a + (*py) * (255 - a)) / 255);
                 }
 
-                // UV plane (NV12: interleaved U, V)
                 int uv_x = (tx & ~1);
                 int uv_y = ty / 2;
                 uint8_t *puv = dst_uv + uv_y * stride_uv + uv_x;
@@ -1083,7 +1162,7 @@ static void draw_cursor_onto_frame(VideoEncoderContext *ctx) {
                 }
             }
         }
-    } else { // YUV420P
+    } else {
         uint8_t *dst_u = ctx->sw_frame->data[1];
         uint32_t stride_u = (uint32_t)ctx->sw_frame->linesize[1];
         uint8_t *dst_v = ctx->sw_frame->data[2];
@@ -1131,6 +1210,49 @@ static void draw_cursor_onto_frame(VideoEncoderContext *ctx) {
                     *pu = (uint8_t)((u_val * a + (*pu) * (255 - a)) / 255);
                     *pv = (uint8_t)((v_val * a + (*pv) * (255 - a)) / 255);
                 }
+            }
+        }
+    }
+}
+
+static void restore_cursor_patch(VideoEncoderContext *ctx, const CursorPatchBackup *backup) {
+    if (!ctx || !ctx->sw_frame || !ctx->sw_frame->data[0] || !backup || !backup->valid) return;
+
+    uint8_t *dst_y = ctx->sw_frame->data[0];
+    uint32_t stride_y = (uint32_t)ctx->sw_frame->linesize[0];
+    for (int ty = backup->y; ty <= backup->max_y; ty++) {
+        int by = ty - backup->y;
+        uint8_t *row_y = dst_y + ty * stride_y;
+        for (int tx = backup->x; tx <= backup->max_x; tx++) {
+            row_y[tx] = backup->y_plane[by][tx - backup->x];
+        }
+    }
+
+    if (backup->is_nv12) {
+        uint8_t *dst_uv = ctx->sw_frame->data[1];
+        uint32_t stride_uv = (uint32_t)ctx->sw_frame->linesize[1];
+        for (int uy = backup->uv_y0; uy <= backup->uv_y1; uy++) {
+            int buy = uy - backup->uv_y0;
+            uint8_t *row_uv = dst_uv + uy * stride_uv;
+            for (int ux = backup->uv_x0; ux <= backup->uv_x1; ux++) {
+                int bux = (ux - backup->uv_x0) * 2;
+                row_uv[ux * 2] = backup->uv_plane[buy][bux];
+                row_uv[ux * 2 + 1] = backup->uv_plane[buy][bux + 1];
+            }
+        }
+    } else {
+        uint8_t *dst_u = ctx->sw_frame->data[1];
+        uint32_t stride_u = (uint32_t)ctx->sw_frame->linesize[1];
+        uint8_t *dst_v = ctx->sw_frame->data[2];
+        uint32_t stride_v = (uint32_t)ctx->sw_frame->linesize[2];
+        for (int uy = backup->uv_y0; uy <= backup->uv_y1; uy++) {
+            int buy = uy - backup->uv_y0;
+            uint8_t *row_u = dst_u + uy * stride_u;
+            uint8_t *row_v = dst_v + uy * stride_v;
+            for (int ux = backup->uv_x0; ux <= backup->uv_x1; ux++) {
+                int bux = ux - backup->uv_x0;
+                row_u[ux] = backup->u_plane[buy][bux];
+                row_v[ux] = backup->v_plane[buy][bux];
             }
         }
     }
@@ -1201,12 +1323,16 @@ static inline void convert_source_bgra_to_sw_frame(
 }
 
 static int encode_sw_frame(VideoEncoderContext *ctx, int64_t pts_nanos) {
+    CursorPatchBackup backup = {0};
     if (ctx->capture_cursor) {
-        draw_cursor_onto_frame(ctx);
+        draw_cursor_onto_frame(ctx, &backup);
     }
     int64_t pts = get_next_monotonic_pts(ctx, pts_nanos);
     ctx->sw_frame->pts = pts;
     int ret = avcodec_send_frame(ctx->codec_ctx, ctx->sw_frame);
+    if (ctx->capture_cursor && backup.valid) {
+        restore_cursor_patch(ctx, &backup);
+    }
     if (ret < 0) {
         char errbuf[128] = {0};
         av_strerror(ret, errbuf, sizeof(errbuf));
@@ -1215,6 +1341,53 @@ static int encode_sw_frame(VideoEncoderContext *ctx, int64_t pts_nanos) {
     }
     drain_encoder_packets(ctx);
     return 0;
+}
+
+static int drain_staged_frame(VideoEncoderContext *ctx, int read_idx) {
+    if (!ctx || !ctx->staging_textures[read_idx] || !ctx->d3d11_context) return -1;
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    HRESULT hr = ctx->d3d11_context->lpVtbl->Map(
+        ctx->d3d11_context,
+        (ID3D11Resource*)ctx->staging_textures[read_idx],
+        0,
+        D3D11_MAP_READ,
+        0,
+        &mapped
+    );
+    if (FAILED(hr)) return -1;
+
+    if (ctx->use_gpu_nv12_staging) {
+        prepare_sw_frame_if_needed(ctx);
+        const uint8_t *src_y = (const uint8_t*)mapped.pData;
+        const uint8_t *src_uv = (const uint8_t*)mapped.pData + ctx->height * mapped.RowPitch;
+
+        uint8_t *dst_y = ctx->sw_frame->data[0];
+        uint8_t *dst_uv = ctx->sw_frame->data[1];
+        uint32_t dst_stride_y = (uint32_t)ctx->sw_frame->linesize[0];
+        uint32_t dst_stride_uv = (uint32_t)ctx->sw_frame->linesize[1];
+
+        if (mapped.RowPitch == dst_stride_y && mapped.RowPitch == ctx->width) {
+            memcpy(dst_y, src_y, ctx->width * ctx->height);
+        } else {
+            for (uint32_t r = 0; r < ctx->height; r++) {
+                memcpy(dst_y + r * dst_stride_y, src_y + r * mapped.RowPitch, ctx->width);
+            }
+        }
+
+        uint32_t uv_lines = ctx->height / 2;
+        if (mapped.RowPitch == dst_stride_uv && mapped.RowPitch == ctx->width) {
+            memcpy(dst_uv, src_uv, ctx->width * uv_lines);
+        } else {
+            for (uint32_t r = 0; r < uv_lines; r++) {
+                memcpy(dst_uv + r * dst_stride_uv, src_uv + r * mapped.RowPitch, ctx->width);
+            }
+        }
+    } else {
+        convert_source_bgra_to_sw_frame(ctx, (const uint8_t*)mapped.pData, mapped.RowPitch);
+    }
+
+    ctx->d3d11_context->lpVtbl->Unmap(ctx->d3d11_context, (ID3D11Resource*)ctx->staging_textures[read_idx], 0);
+    return encode_sw_frame(ctx, ctx->staging_pts[read_idx]);
 }
 
 int ffmpeg_encoder_send_d3d11_texture(VideoEncoderContext *ctx, void *d3d11_texture, int64_t pts_nanos) {
@@ -1285,8 +1458,6 @@ int ffmpeg_encoder_send_d3d11_texture(VideoEncoderContext *ctx, void *d3d11_text
         }
     }
 
-    // Step 3: Ultra-Fast Asynchronous Ring-Buffer Staging Pipeline
-    // Lazily allocate double-buffered staging textures only when direct D3D11VA hardware path is not used
     if (!ctx->staging_textures[0] && ctx->d3d11_device) {
         D3D11_TEXTURE2D_DESC sdesc = {0};
         sdesc.Width = ctx->use_gpu_nv12_staging ? ctx->width : ctx->src_width;
@@ -1302,11 +1473,10 @@ int ffmpeg_encoder_send_d3d11_texture(VideoEncoderContext *ctx, void *d3d11_text
         }
     }
 
-    if (ctx->staging_textures[0] && ctx->d3d11_context) {
+    if (ctx->staging_textures[0] && ctx->staging_textures[1] && ctx->d3d11_context) {
         int write_idx = ctx->staging_index;
         ctx->staging_pts[write_idx] = pts_nanos;
 
-        // Source resource to copy: if GPU converted to NV12, copy that; otherwise copy BGRA texture
         ID3D11Resource *src_to_stage = (ctx->use_gpu_nv12_staging && ctx->gpu_nv12_texture)
             ? (ID3D11Resource*)ctx->gpu_nv12_texture
             : (ID3D11Resource*)d3d11_texture;
@@ -1319,81 +1489,12 @@ int ffmpeg_encoder_send_d3d11_texture(VideoEncoderContext *ctx, void *d3d11_text
 
         ctx->staging_index = (ctx->staging_index + 1) % STAGING_BUFFERS;
 
-        // Fill initial ring buffer pipeline (need STAGING_BUFFERS - 1 frames buffered before reading)
-        if (ctx->staging_count < (STAGING_BUFFERS - 1)) {
-            ctx->staging_count++;
+        if (ctx->staging_count < 1) {
+            ctx->staging_count = 1;
             return 0;
         }
 
-        // Read the oldest completed frame: GPU DMA has finished 3 ticks ago
-        int read_idx = ctx->staging_index;
-        D3D11_MAPPED_SUBRESOURCE mapped;
-        // 0x00100000 = D3D11_MAP_FLAG_DO_NOT_WAIT (never stall game render thread!)
-        HRESULT hr = ctx->d3d11_context->lpVtbl->Map(
-            ctx->d3d11_context,
-            (ID3D11Resource*)ctx->staging_textures[read_idx],
-            0,
-            D3D11_MAP_READ,
-            0x00100000,
-            &mapped
-        );
-
-        if (hr == (HRESULT)0x887A000A) {
-            // DXGI_ERROR_WAS_STILL_DRAWING: GPU is under 100% load, do NOT stall the game!
-            return 0;
-        }
-
-        if (FAILED(hr)) {
-            hr = ctx->d3d11_context->lpVtbl->Map(
-                ctx->d3d11_context,
-                (ID3D11Resource*)ctx->staging_textures[read_idx],
-                0,
-                D3D11_MAP_READ,
-                0,
-                &mapped
-            );
-        }
-
-        if (SUCCEEDED(hr)) {
-            if (ctx->use_gpu_nv12_staging) {
-                // GPU already converted BGRA -> NV12 in hardware!
-                // Zero CPU math! Directly pass NV12 planes with fast contiguous memcpy:
-                prepare_sw_frame_if_needed(ctx);
-                const uint8_t *src_y = (const uint8_t*)mapped.pData;
-                const uint8_t *src_uv = (const uint8_t*)mapped.pData + ctx->height * mapped.RowPitch;
-
-                uint8_t *dst_y = ctx->sw_frame->data[0];
-                uint8_t *dst_uv = ctx->sw_frame->data[1];
-                uint32_t dst_stride_y = (uint32_t)ctx->sw_frame->linesize[0];
-                uint32_t dst_stride_uv = (uint32_t)ctx->sw_frame->linesize[1];
-
-                if (mapped.RowPitch == dst_stride_y && mapped.RowPitch == ctx->width) {
-                    memcpy(dst_y, src_y, ctx->width * ctx->height);
-                } else {
-                    for (uint32_t r = 0; r < ctx->height; r++) {
-                        memcpy(dst_y + r * dst_stride_y, src_y + r * mapped.RowPitch, ctx->width);
-                    }
-                }
-
-                uint32_t uv_lines = ctx->height / 2;
-                if (mapped.RowPitch == dst_stride_uv && mapped.RowPitch == ctx->width) {
-                    memcpy(dst_uv, src_uv, ctx->width * uv_lines);
-                } else {
-                    for (uint32_t r = 0; r < uv_lines; r++) {
-                        memcpy(dst_uv + r * dst_stride_uv, src_uv + r * mapped.RowPitch, ctx->width);
-                    }
-                }
-            } else {
-                // Legacy CPU conversion fallback
-                convert_source_bgra_to_sw_frame(ctx, (const uint8_t*)mapped.pData, mapped.RowPitch);
-            }
-
-            // Immediately unmap to release GPU staging lock in < 0.1ms
-            ctx->d3d11_context->lpVtbl->Unmap(ctx->d3d11_context, (ID3D11Resource*)ctx->staging_textures[read_idx], 0);
-
-            // Encode frame
-            return encode_sw_frame(ctx, ctx->staging_pts[read_idx]);
-        }
+        return drain_staged_frame(ctx, ctx->staging_index);
     }
 
     return -1;
@@ -1401,6 +1502,11 @@ int ffmpeg_encoder_send_d3d11_texture(VideoEncoderContext *ctx, void *d3d11_text
 
 int ffmpeg_encoder_repeat_last_frame(VideoEncoderContext *ctx, int64_t pts_nanos) {
     if (!ctx || !ctx->codec_ctx) return -1;
+
+    if (ctx->staging_count > 0 && ctx->staging_textures[0] && ctx->d3d11_context) {
+        drain_staged_frame(ctx, (ctx->staging_index + 1) % STAGING_BUFFERS);
+        ctx->staging_count = 0;
+    }
 
     // Zero-cost hardware repeat: re-send existing GPU NV12 texture in VRAM
     if (ctx->is_hardware && ctx->hw_frames_ref && ctx->gpu_nv12_texture && ctx->hw_frame->width > 0) {
@@ -1427,53 +1533,9 @@ int ffmpeg_encoder_send_cpu_frame(VideoEncoderContext *ctx, const uint8_t *bgra_
 
 int ffmpeg_encoder_flush(VideoEncoderContext *ctx) {
     if (!ctx || !ctx->codec_ctx) return -1;
-    // Process remaining buffered frames from staging pipeline
-    while (ctx->staging_count > 0 && ctx->staging_textures[0] && ctx->d3d11_context) {
-        int read_idx = ctx->staging_index;
-        D3D11_MAPPED_SUBRESOURCE mapped;
-        HRESULT hr = ctx->d3d11_context->lpVtbl->Map(
-            ctx->d3d11_context,
-            (ID3D11Resource*)ctx->staging_textures[read_idx],
-            0,
-            D3D11_MAP_READ,
-            0,
-            &mapped
-        );
-        if (SUCCEEDED(hr)) {
-            if (ctx->use_gpu_nv12_staging) {
-                prepare_sw_frame_if_needed(ctx);
-                const uint8_t *src_y = (const uint8_t*)mapped.pData;
-                const uint8_t *src_uv = (const uint8_t*)mapped.pData + ctx->height * mapped.RowPitch;
-
-                uint8_t *dst_y = ctx->sw_frame->data[0];
-                uint8_t *dst_uv = ctx->sw_frame->data[1];
-                uint32_t dst_stride_y = (uint32_t)ctx->sw_frame->linesize[0];
-                uint32_t dst_stride_uv = (uint32_t)ctx->sw_frame->linesize[1];
-
-                if (mapped.RowPitch == dst_stride_y && mapped.RowPitch == ctx->width) {
-                    memcpy(dst_y, src_y, ctx->width * ctx->height);
-                } else {
-                    for (uint32_t r = 0; r < ctx->height; r++) {
-                        memcpy(dst_y + r * dst_stride_y, src_y + r * mapped.RowPitch, ctx->width);
-                    }
-                }
-
-                uint32_t uv_lines = ctx->height / 2;
-                if (mapped.RowPitch == dst_stride_uv && mapped.RowPitch == ctx->width) {
-                    memcpy(dst_uv, src_uv, ctx->width * uv_lines);
-                } else {
-                    for (uint32_t r = 0; r < uv_lines; r++) {
-                        memcpy(dst_uv + r * dst_stride_uv, src_uv + r * mapped.RowPitch, ctx->width);
-                    }
-                }
-            } else {
-                convert_source_bgra_to_sw_frame(ctx, (const uint8_t*)mapped.pData, mapped.RowPitch);
-            }
-            ctx->d3d11_context->lpVtbl->Unmap(ctx->d3d11_context, (ID3D11Resource*)ctx->staging_textures[read_idx], 0);
-            encode_sw_frame(ctx, ctx->staging_pts[read_idx]);
-        }
-        ctx->staging_index = (ctx->staging_index + 1) % STAGING_BUFFERS;
-        ctx->staging_count--;
+    if (ctx->staging_count > 0 && ctx->staging_textures[0] && ctx->d3d11_context) {
+        drain_staged_frame(ctx, (ctx->staging_index + 1) % STAGING_BUFFERS);
+        ctx->staging_count = 0;
     }
     avcodec_send_frame(ctx->codec_ctx, NULL);
     drain_encoder_packets(ctx);
@@ -1557,8 +1619,7 @@ MuxerContext* ffmpeg_muxer_create(
         }
     }
 
-    // Cap maximum interleaving delay to 1 second (prevents unbounded memory growth)
-    m->fmt_ctx->max_interleave_delta = 200000;
+    m->fmt_ctx->max_interleave_delta = 500000;
 
     // Configure faststart for MP4/MOV containers
     if (m->fmt_ctx->oformat && (strstr(m->fmt_ctx->oformat->name, "mp4") || strstr(m->fmt_ctx->oformat->name, "mov"))) {
@@ -1642,8 +1703,7 @@ MuxerContext* ffmpeg_muxer_create(
 
     if (!(m->fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
         AVDictionary *io_opts = NULL;
-        // 2026 Next-Gen High-Throughput NVMe Direct Buffer (256 KB block write alignment)
-        av_dict_set(&io_opts, "buffer_size", "65536", 0);
+        av_dict_set(&io_opts, "buffer_size", "262144", 0);
         ret = avio_open2(&m->fmt_ctx->pb, output_file, AVIO_FLAG_WRITE, NULL, &io_opts);
         av_dict_free(&io_opts);
         if (ret < 0) {

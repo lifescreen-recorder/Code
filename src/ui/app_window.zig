@@ -49,7 +49,7 @@ pub const UiState = extern struct {
     encoder_choice: c_int = 0,
     qsv_preset: c_int = 0,
     qsv_low_power: bool = true,
-    qsv_async_depth: c_int = 1,
+    qsv_async_depth: c_int = 4,
     intel_msdk_codec: c_int = 0,
     ffmpeg_hw_engine: c_int = 0,
     ffmpeg_hw_codec: c_int = 0,
@@ -110,6 +110,11 @@ pub const UiState = extern struct {
     mic_compressor: bool = false,
     mic_comp_amount: f32 = 0.5,
     mic_gain_db: f32 = 0.0,
+
+    sys_clarity_filter: bool = false,
+    sys_compressor: bool = false,
+    sys_comp_amount: f32 = 0.5,
+    sys_gain_db: f32 = 0.0,
 };
 
 extern fn imgui_window_create(width: c_int, height: c_int, title: [*:0]const u8) callconv(.c) bool;

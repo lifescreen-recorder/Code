@@ -46,6 +46,9 @@ pub fn build(b: *std.Build) void {
 
     if (is_windows) {
         exe.subsystem = .windows;
+        exe.root_module.addWin32ResourceFile(.{
+            .file = b.path("resources/lifescreen.rc"),
+        });
     }
 
     // Add C bridges and FFmpeg options to root_module

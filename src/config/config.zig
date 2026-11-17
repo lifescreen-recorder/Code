@@ -79,7 +79,7 @@ pub const EncoderConfig = struct {
     keyframe_interval_secs: u32 = 2,
     container: ContainerFormat = .mkv,
     qsv_low_power: bool = true,
-    qsv_async_depth: u32 = 1,
+    qsv_async_depth: u32 = 4,
     wmf_scenario: u32 = 1,
     wmf_rate_control: u32 = 2,
     wmf_quality: u32 = 70,
@@ -113,6 +113,10 @@ pub const AudioConfig = struct {
     mic_compressor: bool = false,
     mic_comp_amount: f32 = 0.5,
     mic_gain_db: f32 = 0.0,
+    sys_clarity_filter: bool = false,
+    sys_compressor: bool = false,
+    sys_comp_amount: f32 = 0.5,
+    sys_gain_db: f32 = 0.0,
 };
 
 pub const OutputConfig = struct {

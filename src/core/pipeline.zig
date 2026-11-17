@@ -35,6 +35,8 @@ pub const Pipeline = struct {
     stats: *stats.AtomicStats,
     cmd_queue: *command.CommandQueue,
     master_start_nanos: u64 = 0,
+    audio_ready: std.atomic.Value(bool) = .init(false),
+    clock_started: std.atomic.Value(bool) = .init(false),
     is_running: std.atomic.Value(bool) = .init(false),
     is_paused: std.atomic.Value(bool) = .init(false),
     capture_active: std.atomic.Value(bool) = .init(false),
@@ -93,9 +95,11 @@ pub const Pipeline = struct {
             enc_height = self.cfg.video.resolution_height;
         }
 
-        // Initialize FFmpeg Video Encoder using the EXACT same D3D11 device and context
+        var enc_cfg = self.cfg;
+        enc_cfg.video.capture_cursor = self.cfg.video.capture_cursor and (capture.backend_type != .wgc);
+
         var video_enc = try encoder.FfmpegEncoder.init(
-            self.cfg,
+            enc_cfg,
             enc_width,
             enc_height,
             capture.width,
@@ -148,6 +152,8 @@ pub const Pipeline = struct {
         self.wav_out = wav_out_inst;
 
         clock.enableHighResolutionTimer();
+        self.audio_ready.store(false, .release);
+        self.clock_started.store(false, .release);
         self.master_start_nanos = clock.MonotonicClock.nowNanos();
 
         self.is_running.store(true, .release);
@@ -213,9 +219,8 @@ pub const Pipeline = struct {
         _ = self.stats.encoded_frames.fetchAdd(1, .monotonic);
     }
 
-    // 1. Capture Thread: DXGI Desktop Duplication (NORMAL priority to not starve games)
     fn captureWorker(self: *Pipeline) void {
-        _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+        _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
         const input_desk = OpenInputDesktop(0, 0, 0x01FF);
         if (input_desk) |desk| {
             _ = SetThreadDesktop(desk);
@@ -224,9 +229,39 @@ pub const Pipeline = struct {
             _ = CloseDesktop(desk);
         };
         const frame_interval_ns = std.time.ns_per_s / self.cfg.video.fps;
-        var next_target_time = self.master_start_nanos + frame_interval_ns;
         var frame_idx: u64 = 0;
         var last_valid_frame: ?types.VideoFrame = null;
+
+        var warmup_tries: u32 = 0;
+        while (warmup_tries < 10 and self.capture_active.load(.acquire)) : (warmup_tries += 1) {
+            if (self.cap) |*c| {
+                if (c.acquireFrame(5, 0) catch null) |f| {
+                    last_valid_frame = f;
+                    break;
+                }
+            }
+            clock.sleepMs(5);
+        }
+
+        var wait_audio: u32 = 0;
+        while (!self.audio_ready.load(.acquire) and wait_audio < 300 and self.capture_active.load(.acquire)) : (wait_audio += 1) {
+            clock.sleepMs(1);
+        }
+
+        self.master_start_nanos = clock.MonotonicClock.nowNanos();
+        self.clock_started.store(true, .release);
+        var next_target_time = self.master_start_nanos + frame_interval_ns;
+
+        if (last_valid_frame) |first_frame| {
+            var f0 = first_frame;
+            f0.pts_nanos = 0;
+            f0.frame_index = 0;
+            f0.is_repeat = false;
+            last_valid_frame = f0;
+            _ = self.stats.captured_frames.fetchAdd(1, .monotonic);
+            _ = self.frame_ring.tryPush(f0);
+            frame_idx = 1;
+        }
 
         while (self.capture_active.load(.acquire)) {
             if (self.is_paused.load(.monotonic)) {
@@ -234,15 +269,14 @@ pub const Pipeline = struct {
                 continue;
             }
 
-            // High-precision hybrid sleep/yield to hit exact microsecond target
             clock.sleepPreciseUntil(next_target_time);
 
             const now_ns = clock.MonotonicClock.nowNanos();
             const real_pts_nanos = if (now_ns > self.master_start_nanos) now_ns - self.master_start_nanos else 0;
             self.stats.duration_nanos.store(real_pts_nanos, .monotonic);
+            const grid_pts_nanos = frame_idx * frame_interval_ns;
 
-            // Wait up to 1ms for GPU flip (zero delay to keep game smooth)
-            const maybe_frame = if (self.cap) |*c| c.acquireFrame(1, real_pts_nanos) catch |err| blk: {
+            const maybe_frame = if (self.cap) |*c| c.acquireFrame(1, grid_pts_nanos) catch |err| blk: {
                 log.warn("Capture frame error: {s}", .{@errorName(err)});
                 break :blk null;
             } else null;
@@ -255,8 +289,7 @@ pub const Pipeline = struct {
                     app_window.imgui_update_preview_d3d11(frame.gpu_texture_ptr, @intCast(frame.width), @intCast(frame.height));
                 }
 
-                // Real-time low-RAM live pacing: cap queue depth at 4 frames
-                while (self.frame_ring.available() >= 4) {
+                while (self.frame_ring.available() >= 8) {
                     _ = self.frame_ring.tryPop();
                     _ = self.stats.dropped_frames.fetchAdd(1, .monotonic);
                 }
@@ -266,14 +299,13 @@ pub const Pipeline = struct {
                 }
                 frame_idx += 1;
             } else if (last_valid_frame) |prev| {
-                // Zero-cost CFR pacing: emit lightweight repeat token (0 GPU/DMA copy) so 30/60 FPS stays 100% locked
-                if (self.frame_ring.available() == 0) {
+                if (self.frame_ring.available() < 2) {
                     var repeat_frame = prev;
-                    repeat_frame.pts_nanos = real_pts_nanos;
+                    repeat_frame.pts_nanos = grid_pts_nanos;
                     repeat_frame.frame_index = frame_idx;
                     repeat_frame.is_repeat = true;
 
-                    last_valid_frame.?.pts_nanos = real_pts_nanos;
+                    last_valid_frame.?.pts_nanos = grid_pts_nanos;
                     _ = self.stats.captured_frames.fetchAdd(1, .monotonic);
                     if (!self.frame_ring.tryPush(repeat_frame)) {
                         _ = self.stats.dropped_frames.fetchAdd(1, .monotonic);
@@ -282,19 +314,19 @@ pub const Pipeline = struct {
                 }
             }
 
-            // Advance target time to next tick
             const current_now = clock.MonotonicClock.nowNanos();
             if (current_now >= next_target_time + (frame_interval_ns * 2)) {
-                next_target_time = current_now + frame_interval_ns;
+                const missed = (current_now - next_target_time) / frame_interval_ns;
+                next_target_time += (missed + 1) * frame_interval_ns;
+                frame_idx += missed;
             } else {
                 next_target_time += frame_interval_ns;
             }
         }
     }
 
-    // 2. Encoder Thread: FFmpeg NVENC/QSV/x264 (NORMAL priority)
     fn encoderWorker(self: *Pipeline) void {
-        _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+        _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 
         while (self.encoder_active.load(.acquire) or self.frame_ring.available() > 0) {
 
@@ -372,6 +404,7 @@ pub const Pipeline = struct {
         capture: ?wasapi.WasapiCapture = null,
         fifo: AudioFifo = .{},
         dsp: audio_dsp.VoiceChain = audio_dsp.VoiceChain.init(48000.0),
+        sys_dsp: audio_dsp.SystemChain = audio_dsp.SystemChain.init(48000.0),
         buffer: [8192]f32 = undefined,
         resample_buffer: [8192]f32 = undefined,
     };
@@ -462,6 +495,16 @@ pub const Pipeline = struct {
                         self.cfg.audio.mic_gain_db,
                         src.volume,
                     );
+                } else {
+                    src.sys_dsp = audio_dsp.SystemChain.init(@floatFromInt(c.sample_rate));
+                    src.sys_dsp.configureSystemChain(
+                        @floatFromInt(c.sample_rate),
+                        self.cfg.audio.sys_clarity_filter,
+                        self.cfg.audio.sys_compressor,
+                        self.cfg.audio.sys_comp_amount,
+                        self.cfg.audio.sys_gain_db,
+                        src.volume,
+                    );
                 }
             } else |err| {
                 src.enabled = false;
@@ -476,6 +519,16 @@ pub const Pipeline = struct {
         defer for (&sources) |*src| {
             if (src.capture) |*cap| cap.deinit();
         };
+
+        for (&sources) |*src| {
+            if (src.capture) |*c| {
+                while (c.readSamples(&src.buffer, &src.peak) > 0) {}
+            }
+        }
+        self.audio_ready.store(true, .release);
+        while (!self.clock_started.load(.acquire) and self.audio_active.load(.acquire)) {
+            clock.sleepMs(1);
+        }
 
         var total_frames_written: u64 = 0;
         const sample_rate: u64 = MIX_SAMPLE_RATE;
@@ -517,12 +570,15 @@ pub const Pipeline = struct {
                     );
                     src.dsp.processBuffer(src.buffer[0..raw_count], 2);
                 } else {
-                    const vol = src.volume;
-                    if (vol != 1.0) {
-                        for (src.buffer[0..raw_count]) |*s| {
-                            s.* = std.math.clamp(s.* * vol, -1.0, 1.0);
-                        }
-                    }
+                    src.sys_dsp.configureSystemChain(
+                        @floatFromInt(capture.sample_rate),
+                        self.cfg.audio.sys_clarity_filter,
+                        self.cfg.audio.sys_compressor,
+                        self.cfg.audio.sys_comp_amount,
+                        self.cfg.audio.sys_gain_db,
+                        src.volume,
+                    );
+                    src.sys_dsp.processBuffer(src.buffer[0..raw_count], 2);
                 }
 
                 var out_samples: []f32 = undefined;

@@ -76,7 +76,7 @@ const WindowEntries = struct {
 };
 
 pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms: ?u32) !void {
-    var window = try app_window.AppWindow.init("LifeScreen Recorder", 960, 680);
+    var window = try app_window.AppWindow.init("LifeScreen Recorder", 1040, 720);
     defer window.deinit();
 
     var global_stats = stats.AtomicStats{};
@@ -278,6 +278,10 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
     ui_state.mic_compressor = cfg.audio.mic_compressor;
     ui_state.mic_comp_amount = cfg.audio.mic_comp_amount;
     ui_state.mic_gain_db = cfg.audio.mic_gain_db;
+    ui_state.sys_clarity_filter = cfg.audio.sys_clarity_filter;
+    ui_state.sys_compressor = cfg.audio.sys_compressor;
+    ui_state.sys_comp_amount = cfg.audio.sys_comp_amount;
+    ui_state.sys_gain_db = cfg.audio.sys_gain_db;
 
     ui_state.output_resolution = if (cfg.video.resolution_width == 1920 and cfg.video.resolution_height == 1080)
         1
@@ -536,6 +540,10 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
             recorder_pipeline.cfg.audio.mic_compressor = ui_state.mic_compressor;
             recorder_pipeline.cfg.audio.mic_comp_amount = ui_state.mic_comp_amount;
             recorder_pipeline.cfg.audio.mic_gain_db = ui_state.mic_gain_db;
+            recorder_pipeline.cfg.audio.sys_clarity_filter = ui_state.sys_clarity_filter;
+            recorder_pipeline.cfg.audio.sys_compressor = ui_state.sys_compressor;
+            recorder_pipeline.cfg.audio.sys_comp_amount = ui_state.sys_comp_amount;
+            recorder_pipeline.cfg.audio.sys_gain_db = ui_state.sys_gain_db;
             recorder_pipeline.cfg.encoder.container = switch (ui_state.container_format) {
                 1 => .mp4,
                 2 => .mov,
@@ -613,6 +621,10 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
                 recorder_pipeline.cfg.audio.mic_compressor = ui_state.mic_compressor;
                 recorder_pipeline.cfg.audio.mic_comp_amount = ui_state.mic_comp_amount;
                 recorder_pipeline.cfg.audio.mic_gain_db = ui_state.mic_gain_db;
+                recorder_pipeline.cfg.audio.sys_clarity_filter = ui_state.sys_clarity_filter;
+                recorder_pipeline.cfg.audio.sys_compressor = ui_state.sys_compressor;
+                recorder_pipeline.cfg.audio.sys_comp_amount = ui_state.sys_comp_amount;
+                recorder_pipeline.cfg.audio.sys_gain_db = ui_state.sys_gain_db;
                 recorder_pipeline.cfg.encoder.container = switch (ui_state.container_format) {
                     1 => .mp4,
                     2 => .mov,
