@@ -115,6 +115,29 @@ pub const UiState = extern struct {
     sys_compressor: bool = false,
     sys_comp_amount: f32 = 0.5,
     sys_gain_db: f32 = 0.0,
+
+    camera_enabled: bool = false,
+    camera_source_type: c_int = 0,
+    camera_device_index: c_int = 0,
+    camera_device_names: ?[*]const [*:0]const u8 = null,
+    camera_device_count: c_int = 0,
+    camera_web_url: [512]u8 = std.mem.zeroes([512]u8),
+    camera_position: c_int = 0,
+    camera_pos_x: f32 = 0.80,
+    camera_pos_y: f32 = 0.75,
+    camera_margin_px: c_int = 24,
+    camera_size_pct: f32 = 0.22,
+    camera_aspect_ratio: c_int = 0,
+    camera_shape: c_int = 1,
+    camera_corner_radius: f32 = 16.0,
+    camera_border_thickness: f32 = 3.0,
+    camera_border_color: u32 = 0x0EA5E9FF,
+    camera_opacity: f32 = 1.0,
+    camera_mirror: bool = false,
+    camera_chroma_key: bool = false,
+    camera_chroma_color: u32 = 0x00FF00,
+    camera_chroma_sim: f32 = 0.40,
+    camera_chroma_smooth: f32 = 0.10,
 };
 
 extern fn imgui_window_create(width: c_int, height: c_int, title: [*:0]const u8) callconv(.c) bool;
@@ -131,6 +154,10 @@ pub extern fn imgui_update_preview_d3d11(texture_ptr: ?*anyopaque, width: c_int,
 pub extern fn imgui_update_preview_bgra(data: ?[*]const u8, width: c_int, height: c_int, stride: c_int) callconv(.c) void;
 pub extern fn imgui_set_preview_enabled(enabled: bool) callconv(.c) void;
 pub extern fn imgui_is_preview_enabled() callconv(.c) bool;
+
+pub extern fn imgui_camera_composite_d3d11(dest_texture: ?*anyopaque, screen_w: c_int, screen_h: c_int) callconv(.c) void;
+pub extern fn imgui_camera_composite_sw_frame(dst_y: ?[*]u8, dst_uv: ?[*]u8, stride_y: c_int, stride_uv: c_int, width: c_int, height: c_int, is_nv12: bool) callconv(.c) void;
+pub extern fn imgui_camera_is_enabled() callconv(.c) bool;
 
 pub const AppWindow = struct {
     width: i32,

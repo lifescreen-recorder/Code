@@ -15,6 +15,7 @@
 #include <audioclient.h>
 #include <psapi.h>
 #include <math.h>
+#include "camera_engine.h"
 
 extern "C" void lifescreen_dsp_test_mic_process(
     float* samples,
@@ -60,6 +61,7 @@ static int g_audioSessionCount = 0;
 static DWORD g_lastAudioSessionRefresh = 0;
 static bool g_showAppMixerPopup = false;
 static bool g_showAudioFiltersPopup = false;
+static bool g_showCameraOverlayPopup = false;
 static bool g_micTestActive = false;
 static volatile float g_micTestLevel = 0.0f;
 static volatile LONG g_speakerTestRunning = 0;
@@ -1300,9 +1302,304 @@ static void draw_telemetry_badge(const char* id, const char* label, const char* 
     ImGui::PopID();
 }
 
+extern "C" void imgui_camera_composite_d3d11(void* dest_texture, int screen_w, int screen_h) {
+    if (!g_pd3dDevice || !g_pd3dDeviceContext || !dest_texture) return;
+    camera_engine_composite_d3d11(g_pd3dDevice, g_pd3dDeviceContext, dest_texture, screen_w, screen_h);
+}
+
+extern "C" void imgui_camera_composite_sw_frame(uint8_t* dst_y, uint8_t* dst_uv, int stride_y, int stride_uv, int width, int height, bool is_nv12) {
+    camera_engine_composite_sw_frame(dst_y, dst_uv, stride_y, stride_uv, width, height, is_nv12);
+}
+
+extern "C" bool imgui_camera_is_enabled(void) {
+    CameraOverlayConfig cfg;
+    camera_engine_get_settings(&cfg);
+    return cfg.enabled;
+}
+
+static void render_camera_controls(UiState* state, int lang) {
+    if (!state) return;
+
+    camera_engine_init();
+    state->camera_device_names = camera_engine_get_device_names();
+    state->camera_device_count = camera_engine_get_device_count();
+
+    float avail_w = ImGui::GetContentRegionAvail().x;
+    float col_left_w = (avail_w > 560.0f) ? (avail_w * 0.58f) : avail_w;
+    float col_right_w = (avail_w > 560.0f) ? (avail_w - col_left_w - 16.0f) : avail_w;
+
+    ImGui::BeginGroup();
+    ImGui::PushItemWidth(col_left_w - 20.0f);
+
+    if (ImGui::Checkbox(
+        tr(lang,
+            "Enable Camera / Web Overlay",
+            "Увімкнути вебкамеру / веб-оверлей",
+            "启用摄像头 / 画中画",
+            "Kamera- / Web-Overlay aktivieren",
+            "Activer l'incrustation Caméra / Web",
+            "Włącz nakładkę kamery / web"),
+        &state->camera_enabled)) {
+        state->action_settings_changed = true;
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    const char* source_types[3] = {
+        tr(lang, "Webcam (Physical / Virtual Camera)", "Вебкамера (Фізична / Віртуальна)", "摄像头 (物理/虚拟)", "Webcam (Kamera)", "Webcam (Caméra physique/virtuelle)", "Kamera internetowa (Fizyczna/Wirtualna)"),
+        tr(lang, "Studio Test Pattern (OBS Card)", "Тестова таблиця студії (OBS)", "演播室测试卡 (OBS 风格)", "Studio-Testbild (OBS-Karte)", "Mire de test studio (OBS)", "Plansza testowa studia (OBS)"),
+        tr(lang, "Web / Stream URL Resource", "Веб-ресурс / Стрім URL", "网络 / 直播流 URL", "Web- / Stream-URL-Ressource", "Ressource Web / URL de flux", "Zasób Web / URL strumienia")
+    };
+
+    ImGui::TextColored(ImVec4(0.80f, 0.85f, 0.95f, 1.00f), "%s",
+        tr(lang, "Camera Source:", "Джерело камери:", "摄像头信号源:", "Kameraquelle:", "Source de la caméra :", "Źródło kamery:"));
+    if (ImGui::Combo("##CamSourceType", &state->camera_source_type, source_types, 3)) {
+        state->action_settings_changed = true;
+    }
+
+    if (state->camera_source_type == 0) {
+        ImGui::TextDisabled("%s", tr(lang, "Video Capture Device:", "Пристрій захоплення відео:", "视频捕获设备:", "Videoaufnahmegerät:", "Périphérique de capture vidéo :", "Urządzenie przechwytujące wideo:"));
+        const char* cur_cam = (state->camera_device_count > 0 && state->camera_device_index < state->camera_device_count)
+            ? state->camera_device_names[state->camera_device_index]
+            : tr(lang, "No camera detected", "Камер не знайдено", "未检测到摄像头", "Keine Kamera erkannt", "Aucune caméra détectée", "Nie wykryto kamery");
+
+        float ref_btn_w = 78.0f;
+        ImGui::SetNextItemWidth(col_left_w - ref_btn_w - 28.0f);
+        if (ImGui::BeginCombo("##CamDeviceCombo", cur_cam)) {
+            for (int i = 0; i < state->camera_device_count; i++) {
+                bool is_sel = (state->camera_device_index == i);
+                if (ImGui::Selectable(state->camera_device_names[i], is_sel)) {
+                    state->camera_device_index = i;
+                    state->action_settings_changed = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(tr(lang, "Refresh", "Оновити", "刷新", "Aktualis.", "Actualiser", "Odśwież"), ImVec2(ref_btn_w, 24.0f))) {
+            camera_engine_refresh_devices();
+            state->camera_device_names = camera_engine_get_device_names();
+            state->camera_device_count = camera_engine_get_device_count();
+        }
+    } else if (state->camera_source_type == 2) {
+        ImGui::TextDisabled("%s", tr(lang, "Stream / Web Resource URL:", "URL веб-ресурсу / стріму:", "网络资源 / 直播流 URL:", "Stream- / Web-Ressourcen-URL:", "URL de ressource Web / flux :", "URL zasobu Web / strumienia:"));
+        if (ImGui::InputText("##CamWebUrl", state->camera_web_url, sizeof(state->camera_web_url))) {
+            state->action_settings_changed = true;
+        }
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    const char* pos_names[9] = {
+        tr(lang, "Bottom-Right (Standard OBS)", "Знизу праворуч (Стандарт OBS)", "右下角 (OBS 标准)", "Unten rechts (Standard-OBS)", "En bas à droite (Standard OBS)", "W prawym dolnym rogu (Standard OBS)"),
+        tr(lang, "Bottom-Left", "Знизу ліворуч", "左下角", "Unten links", "En bas à gauche", "W lewym dolnym rogu"),
+        tr(lang, "Top-Right", "Зверху праворуч", "右上角", "Oben rechts", "En haut à droite", "W prawym górnym rogu"),
+        tr(lang, "Top-Left", "Зверху ліворуч", "左上角", "Oben links", "En haut à gauche", "W lewym górnym rogu"),
+        tr(lang, "Bottom-Center", "Знизу по центру", "底部居中", "Unten zentriert", "En bas au centre", "Na dole na środku"),
+        tr(lang, "Top-Center", "Зверху по центру", "顶部居中", "Oben zentriert", "En haut au centre", "Na górze na środku"),
+        tr(lang, "Center-Left", "По центру ліворуч", "左侧居中", "Links zentriert", "À gauche au centre", "Po lewej na środku"),
+        tr(lang, "Center-Right", "По центру праворуч", "右侧居中", "Rechts zentriert", "À droite au centre", "Po prawej na środku"),
+        tr(lang, "Custom (Manual X/Y)", "Власна позиція (Ручні X/Y)", "自定义位置 (手动 X/Y)", "Benutzerdefiniert (Manuell X/Y)", "Personnalisé (X/Y manuel)", "Niestandardowa (Ręczne X/Y)")
+    };
+
+    ImGui::TextColored(ImVec4(0.80f, 0.85f, 0.95f, 1.00f), "%s",
+        tr(lang, "Position on Screen:", "Розташування на екрані:", "屏幕画中画位置:", "Position auf dem Bildschirm:", "Position à l'écran :", "Pozycja na ekranie:"));
+    if (ImGui::Combo("##CamPosition", &state->camera_position, pos_names, 9)) {
+        state->action_settings_changed = true;
+    }
+
+    if (state->camera_position == 8) {
+        int px = (int)(state->camera_pos_x * 100.0f + 0.5f);
+        int py = (int)(state->camera_pos_y * 100.0f + 0.5f);
+        if (ImGui::SliderInt(tr(lang, "Horizontal X (%)", "По горизонталі X (%)", "水平位置 X (%)", "Horizontale Position X (%)", "Position horizontale X (%)", "Pozioma pozycja X (%)"), &px, 0, 100, "%d%%")) {
+            state->camera_pos_x = (float)px / 100.0f;
+            state->action_settings_changed = true;
+        }
+        if (ImGui::SliderInt(tr(lang, "Vertical Y (%)", "По вертикалі Y (%)", "垂直位置 Y (%)", "Vertikale Position Y (%)", "Position verticale Y (%)", "Pionowa pozycja Y (%)"), &py, 0, 100, "%d%%")) {
+            state->camera_pos_y = (float)py / 100.0f;
+            state->action_settings_changed = true;
+        }
+    }
+
+    if (ImGui::SliderInt(tr(lang, "Edge Margin (px)", "Відступ від краю (px)", "边缘边距 (像素)", "Randabstand (px)", "Marge du bord (px)", "Margines od krawędzi (px)"), &state->camera_margin_px, 0, 80, "%d px")) {
+        state->action_settings_changed = true;
+    }
+
+    int size_pct = (int)(state->camera_size_pct * 100.0f + 0.5f);
+    if (ImGui::SliderInt(tr(lang, "Overlay Size (% of screen)", "Розмір оверлею (% від екрана)", "画中画尺寸 (% 屏幕宽度)", "Overlay-Größe (% des Bildschirms)", "Taille de l'incrustation (% de l'écran)", "Rozmiar nakładki (% ekranu)"), &size_pct, 10, 50, "%d%%")) {
+        state->camera_size_pct = (float)size_pct / 100.0f;
+        state->action_settings_changed = true;
+    }
+
+    const char* shapes[3] = {
+        tr(lang, "Rectangle (Standard)", "Прямокутник (Стандарт)", "矩形 (标准)", "Rechteck (Standard)", "Rectangle (Standard)", "Prostokąt (Standard)"),
+        tr(lang, "Rounded Corners", "Закруглені кути", "圆角矩形", "Abgerundete Ecken", "Coins arrondis", "Zaokrąglone rogi"),
+        tr(lang, "Circle / Streamer Facecam", "Коло (Фейскам стримера)", "圆形 (主播面部摄像头)", "Kreis (Streamer-Facecam)", "Cercle (Facecam de streamer)", "Koło (Kamera twarzy streamera)")
+    };
+
+    ImGui::TextColored(ImVec4(0.80f, 0.85f, 0.95f, 1.00f), "%s",
+        tr(lang, "Shape & Style:", "Форма та Стиль:", "形状与样式:", "Form & Stil:", "Forme & Style :", "Kształt i Styl:"));
+    if (ImGui::Combo("##CamShape", &state->camera_shape, shapes, 3)) {
+        state->action_settings_changed = true;
+    }
+
+    if (state->camera_shape == 1) {
+        if (ImGui::SliderFloat(tr(lang, "Corner Radius (px)", "Радіус кутів (px)", "圆角半径 (像素)", "Eckenradius (px)", "Rayon des coins (px)", "Promień rogów (px)"), &state->camera_corner_radius, 4.0f, 40.0f, "%.0f px")) {
+            state->action_settings_changed = true;
+        }
+    }
+
+    if (ImGui::SliderFloat(tr(lang, "Border Thickness (px)", "Товщина рамки (px)", "边框粗细 (像素)", "Rahmenstärke (px)", "Épaisseur de bordure (px)", "Grubość ramki (px)"), &state->camera_border_thickness, 0.0f, 8.0f, "%.0f px")) {
+        state->action_settings_changed = true;
+    }
+
+    const char* border_colors[7] = {
+        tr(lang, "Cyan (#0EA5E9) [LifeScreen]", "Блакитний (#0EA5E9) [LifeScreen]", "青色 (#0EA5E9) [LifeScreen]", "Cyan (#0EA5E9) [LifeScreen]", "Cyan (#0EA5E9) [LifeScreen]", "Błękitny (#0EA5E9) [LifeScreen]"),
+        tr(lang, "Purple (#A855F7)", "Фіолетовий (#A855F7)", "紫色 (#A855F7)", "Lila (#A855F7)", "Violet (#A855F7)", "Fioletowy (#A855F7)"),
+        tr(lang, "Green (#10B981)", "Смарагдовий (#10B981)", "绿色 (#10B981)", "Grün (#10B981)", "Vert (#10B981)", "Zielony (#10B981)"),
+        tr(lang, "White (#FFFFFF)", "Білий (#FFFFFF)", "白色 (#FFFFFF)", "Weiß (#FFFFFF)", "Blanc (#FFFFFF)", "Biały (#FFFFFF)"),
+        tr(lang, "Red (#EF4444)", "Червоний (#EF4444)", "红色 (#EF4444)", "Rot (#EF4444)", "Rouge (#EF4444)", "Czerwony (#EF4444)"),
+        tr(lang, "Gold (#F59E0B)", "Золотий (#F59E0B)", "金色 (#F59E0B)", "Gold (#F59E0B)", "Or (#F59E0B)", "Złoty (#F59E0B)"),
+        tr(lang, "Transparent / None", "Прозорий / Без рамки", "无边框", "Transparent / Kein", "Transparent / Aucun", "Przezroczysty / Brak")
+    };
+    const uint32_t border_col_values[7] = {
+        0x0EA5E9FF, 0xA855F7FF, 0x10B981FF, 0xFFFFFFFF, 0xEF4444FF, 0xF59E0BFF, 0x00000000
+    };
+
+    int current_col_idx = 0;
+    for (int ci = 0; ci < 7; ci++) {
+        if (state->camera_border_color == border_col_values[ci]) {
+            current_col_idx = ci;
+            break;
+        }
+    }
+    if (ImGui::Combo(tr(lang, "Border Color", "Колір рамки", "边框颜色", "Rahmenfarbe", "Couleur de bordure", "Kolor ramki"), &current_col_idx, border_colors, 7)) {
+        state->camera_border_color = border_col_values[current_col_idx];
+        state->action_settings_changed = true;
+    }
+
+    int op_pct = (int)(state->camera_opacity * 100.0f + 0.5f);
+    if (ImGui::SliderInt(tr(lang, "Opacity (%)", "Прозорість (%)", "不透明度 (%)", "Deckkraft (%)", "Opacité (%)", "Przezroczystość (%)"), &op_pct, 20, 100, "%d%%")) {
+        state->camera_opacity = (float)op_pct / 100.0f;
+        state->action_settings_changed = true;
+    }
+
+    if (ImGui::Checkbox(
+        tr(lang, "Mirror Camera Horizontally", "Віддзеркалити по горизонталі", "水平镜像画面", "Kamera horizontal spiegeln", "Miroir horizontal", "Odbicie lustrzane w poziomie"),
+        &state->camera_mirror)) {
+        state->action_settings_changed = true;
+    }
+
+    if (ImGui::Checkbox(
+        tr(lang, "Chroma Key (Green Screen Removal)", "Хромакей (Видалення зеленого фону)", "绿幕抠图 (色度键)", "Chroma-Key (Green-Screen-Entfernung)", "Chroma Key (Fond vert)", "Chroma Key (Usuwanie zielonego tła)"),
+        &state->camera_chroma_key)) {
+        state->action_settings_changed = true;
+    }
+
+    if (state->camera_chroma_key) {
+        int sim_pct = (int)(state->camera_chroma_sim * 100.0f + 0.5f);
+        if (ImGui::SliderInt(tr(lang, "Similarity (%)", "Чутливість (%)", "相似度 (%)", "Ähnlichkeit (%)", "Similitude (%)", "Podobieństwo (%)"), &sim_pct, 10, 80, "%d%%")) {
+            state->camera_chroma_sim = (float)sim_pct / 100.0f;
+            state->action_settings_changed = true;
+        }
+    }
+
+    ImGui::PopItemWidth();
+    ImGui::EndGroup();
+
+    if (avail_w > 560.0f) {
+        ImGui::SameLine();
+        ImGui::BeginGroup();
+        ImGui::TextColored(ImVec4(0.24f, 0.66f, 1.00f, 1.00f), "%s",
+            tr(lang, "LIVE CAMERA PREVIEW", "ЖИВИЙ ПЕРЕГЛЯД КАМЕРИ", "实时摄像头预览", "LIVE-KAMERAVORSCHAU", "APERÇU CAMÉRA EN DIRECT", "PODGLĄD KAMERY NA ŻYWO"));
+        ImGui::Spacing();
+
+        void* cam_srv = NULL;
+        int cam_w = 0, cam_h = 0;
+        camera_engine_update_d3d11_preview(g_pd3dDevice, g_pd3dDeviceContext, &cam_srv, &cam_w, &cam_h);
+
+        float p_box_w = col_right_w;
+        float p_box_h = (p_box_w * 9.0f) / 16.0f;
+        if (p_box_h > 240.0f) p_box_h = 240.0f;
+
+        ImVec2 p_pos = ImGui::GetCursorScreenPos();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+
+        dl->AddRectFilled(p_pos, ImVec2(p_pos.x + p_box_w, p_pos.y + p_box_h), 0xFF14171E, 6.0f);
+        dl->AddRect(p_pos, ImVec2(p_pos.x + p_box_w, p_pos.y + p_box_h), 0xFF2A3448, 6.0f);
+
+        if (cam_srv && cam_w > 0 && cam_h > 0) {
+            float c_aspect = (float)cam_w / (float)cam_h;
+            float dr_w = p_box_w - 16.0f;
+            float dr_h = dr_w / c_aspect;
+            if (dr_h > p_box_h - 16.0f) {
+                dr_h = p_box_h - 16.0f;
+                dr_w = dr_h * c_aspect;
+            }
+            float off_x = p_pos.x + (p_box_w - dr_w) * 0.5f;
+            float off_y = p_pos.y + (p_box_h - dr_h) * 0.5f;
+
+            ImVec2 uv0 = state->camera_mirror ? ImVec2(1.0f, 0.0f) : ImVec2(0.0f, 0.0f);
+            ImVec2 uv1 = state->camera_mirror ? ImVec2(0.0f, 1.0f) : ImVec2(1.0f, 1.0f);
+            ImU32 tint = ImGui::ColorConvertFloat4ToU32(ImVec4(1.0f, 1.0f, 1.0f, state->camera_opacity));
+            float rad = (state->camera_shape == 2) ? (dr_w * 0.5f) : ((state->camera_shape == 1) ? state->camera_corner_radius : 0.0f);
+
+            dl->AddImageRounded((ImTextureID)(intptr_t)cam_srv, ImVec2(off_x, off_y), ImVec2(off_x + dr_w, off_y + dr_h), uv0, uv1, tint, rad);
+            if (state->camera_border_thickness > 0.0f) {
+                dl->AddRect(ImVec2(off_x, off_y), ImVec2(off_x + dr_w, off_y + dr_h), state->camera_border_color, rad, 0, state->camera_border_thickness);
+            }
+        } else {
+            const char* off_text = tr(lang, "Camera is Offline or Initializing...", "Камера вимкнена або ініціалізується...", "摄像头离线或正在初始化...", "Kamera offline oder wird initialisiert...", "Caméra hors ligne ou en cours...", "Kamera offline lub trwa inicjalizacja...");
+            ImVec2 txt_sz = ImGui::CalcTextSize(off_text);
+            dl->AddText(ImVec2(p_pos.x + (p_box_w - txt_sz.x) * 0.5f, p_pos.y + (p_box_h - txt_sz.y) * 0.5f), 0xFF64748B, off_text);
+        }
+
+        ImGui::Dummy(ImVec2(p_box_w, p_box_h));
+        ImGui::Spacing();
+
+        if (cam_w > 0 && cam_h > 0) {
+            ImGui::TextColored(ImVec4(0.14f, 0.78f, 0.44f, 1.00f), "%s: %dx%d",
+                tr(lang, "Active Feed", "Активний потік", "活动信号", "Aktiver Feed", "Flux actif", "Aktywny strumień"), cam_w, cam_h);
+        }
+
+        ImGui::EndGroup();
+    }
+}
+
 void imgui_window_render_ui(UiState* state) {
     int lang = state->language;
     bool is_recording = (state->state == 2 || state->state == 3);
+
+    camera_engine_init();
+    state->camera_device_names = camera_engine_get_device_names();
+    state->camera_device_count = camera_engine_get_device_count();
+
+    CameraOverlayConfig cam_cfg;
+    cam_cfg.enabled = state->camera_enabled;
+    cam_cfg.source_type = state->camera_source_type;
+    cam_cfg.device_index = state->camera_device_index;
+    cam_cfg.position = state->camera_position;
+    cam_cfg.pos_x_pct = state->camera_pos_x;
+    cam_cfg.pos_y_pct = state->camera_pos_y;
+    cam_cfg.margin_px = state->camera_margin_px;
+    cam_cfg.size_pct = state->camera_size_pct;
+    cam_cfg.aspect_ratio = state->camera_aspect_ratio;
+    cam_cfg.shape = state->camera_shape;
+    cam_cfg.corner_radius = state->camera_corner_radius;
+    cam_cfg.border_thickness = state->camera_border_thickness;
+    cam_cfg.border_color = state->camera_border_color;
+    cam_cfg.opacity = state->camera_opacity;
+    cam_cfg.mirror = state->camera_mirror;
+    cam_cfg.chroma_key = state->camera_chroma_key;
+    cam_cfg.chroma_color = state->camera_chroma_color;
+    cam_cfg.chroma_similarity = state->camera_chroma_sim;
+    cam_cfg.chroma_smoothness = state->camera_chroma_smooth;
+    snprintf(cam_cfg.web_url, sizeof(cam_cfg.web_url), "%s", state->camera_web_url);
+    camera_engine_update_settings(&cam_cfg);
 
     int max_hz = get_monitor_refresh_rate();
     if (max_hz < 10) max_hz = 60;
@@ -1484,6 +1781,14 @@ void imgui_window_render_ui(UiState* state) {
                         "1. VIDEOQUELLE & BILDSCHIRM",
                         "1. SOURCE VIDÉO & ÉCRAN",
                         "1. ŹRÓDŁO WIDEO I EKRAN"));
+                float hdr_cam_btn_w = 96.0f;
+                ImGui::SameLine(s_inner_w - hdr_cam_btn_w + 14.0f);
+                if (state->camera_enabled) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f, 0.58f, 0.34f, 1.00f));
+                else ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f, 0.28f, 0.48f, 1.00f));
+                if (ImGui::Button(tr(lang, "Webcam##Hdr", "Вебкамера##Hdr", "摄像头##Hdr", "Webcam##Hdr", "Caméra##Hdr", "Kamera##Hdr"), ImVec2(hdr_cam_btn_w, 22))) {
+                    g_showCameraOverlayPopup = true;
+                }
+                ImGui::PopStyleColor();
                 ImGui::Spacing();
 
                 bool is_screen = (state->capture_type == 0);
@@ -1884,6 +2189,29 @@ void imgui_window_render_ui(UiState* state) {
                 ImGui::EndPopup();
             }
 
+            const char* cam_modal_title = tr(lang,
+                "Webcam & Camera Overlay Settings###CamOverlayModal",
+                "Налаштування Вебкамери та Оверлею###CamOverlayModal",
+                "摄像头画中画与网络信号源设置###CamOverlayModal",
+                "Webcam- & Overlay-Einstellungen###CamOverlayModal",
+                "Paramètres d'incrustation Caméra###CamOverlayModal",
+                "Ustawienia Nakładki Kamery###CamOverlayModal");
+            if (g_showCameraOverlayPopup) {
+                ImGui::OpenPopup(cam_modal_title);
+                g_showCameraOverlayPopup = false;
+            }
+            bool cam_modal_open = true;
+            if (ImGui::BeginPopupModal(cam_modal_title, &cam_modal_open, ImGuiWindowFlags_AlwaysAutoResize)) {
+                render_camera_controls(state, lang);
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+                if (ImGui::Button(tr(lang, "Done##CamModal", "Готово##CamModal", "完成##CamModal", "Fertig##CamModal", "Terminé##CamModal", "Gotowe##CamModal"), ImVec2(140, 28))) {
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
+
             ImGui::Spacing();
 
             ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.08f, 0.11f, 0.14f, 1.00f));
@@ -2094,6 +2422,14 @@ void imgui_window_render_ui(UiState* state) {
                     : tr(lang, "Pause Preview", "Пауза", "暂停预览", "Pausieren", "Pause", "Wstrzymaj"))) {
                     g_previewPaused = !g_previewPaused;
                 }
+                ImGui::SameLine();
+                if (ImGui::Checkbox(tr(lang, "Show Webcam Overlay", "Оверлей вебкамери", "画中画预览", "Webcam anzeigen", "Afficher la cam", "Pokaż nakładkę kamery"), &state->camera_enabled)) {
+                    state->action_settings_changed = true;
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton(tr(lang, "Config Webcam...", "Налаштувати...", "配置摄像头...", "Webcam konfigurieren...", "Configurer la cam...", "Konfiguruj kamerę..."))) {
+                    g_showCameraOverlayPopup = true;
+                }
 
                 ImGui::Separator();
                 ImGui::Spacing();
@@ -2110,6 +2446,53 @@ void imgui_window_render_ui(UiState* state) {
                     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (avail.x - draw_w) * 0.5f);
                     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (avail.y - draw_h) * 0.5f);
                     ImGui::Image((ImTextureID)(intptr_t)g_pPreviewSRV, ImVec2(draw_w, draw_h));
+
+                    ImVec2 img_min = ImGui::GetItemRectMin();
+                    if (state->camera_enabled) {
+                        void* cam_srv = NULL;
+                        int cam_w = 0, cam_h = 0;
+                        camera_engine_update_d3d11_preview(g_pd3dDevice, g_pd3dDeviceContext, &cam_srv, &cam_w, &cam_h);
+                        if (cam_srv && cam_w > 0 && cam_h > 0) {
+                            float c_aspect = (float)cam_w / (float)cam_h;
+                            float c_w = draw_w * state->camera_size_pct;
+                            float c_h = (state->camera_aspect_ratio == 2) ? c_w : (c_w / c_aspect);
+                            float m_x = (float)state->camera_margin_px * (draw_w / (float)g_previewWidth);
+                            float m_y = (float)state->camera_margin_px * (draw_h / (float)g_previewHeight);
+                            if (m_x < 4.0f) m_x = 4.0f;
+                            if (m_y < 4.0f) m_y = 4.0f;
+
+                            float c_x = 0.0f, c_y = 0.0f;
+                            switch (state->camera_position) {
+                                case 0: c_x = img_min.x + draw_w - m_x - c_w; c_y = img_min.y + draw_h - m_y - c_h; break;
+                                case 1: c_x = img_min.x + m_x; c_y = img_min.y + draw_h - m_y - c_h; break;
+                                case 2: c_x = img_min.x + draw_w - m_x - c_w; c_y = img_min.y + m_y; break;
+                                case 3: c_x = img_min.x + m_x; c_y = img_min.y + m_y; break;
+                                case 4: c_x = img_min.x + (draw_w - c_w) * 0.5f; c_y = img_min.y + draw_h - m_y - c_h; break;
+                                case 5: c_x = img_min.x + (draw_w - c_w) * 0.5f; c_y = img_min.y + m_y; break;
+                                case 6: c_x = img_min.x + m_x; c_y = img_min.y + (draw_h - c_h) * 0.5f; break;
+                                case 7: c_x = img_min.x + draw_w - m_x - c_w; c_y = img_min.y + (draw_h - c_h) * 0.5f; break;
+                                case 8: default:
+                                    c_x = img_min.x + m_x + state->camera_pos_x * (draw_w - c_w - 2.0f * m_x);
+                                    c_y = img_min.y + m_y + state->camera_pos_y * (draw_h - c_h - 2.0f * m_y);
+                                    break;
+                            }
+
+                            ImDrawList* draw_list = ImGui::GetWindowDrawList();
+                            ImVec2 p_min(c_x, c_y);
+                            ImVec2 p_max(c_x + c_w, c_y + c_h);
+
+                            ImVec2 uv0 = state->camera_mirror ? ImVec2(1.0f, 0.0f) : ImVec2(0.0f, 0.0f);
+                            ImVec2 uv1 = state->camera_mirror ? ImVec2(0.0f, 1.0f) : ImVec2(1.0f, 1.0f);
+                            ImU32 tint_col = ImGui::ColorConvertFloat4ToU32(ImVec4(1.0f, 1.0f, 1.0f, state->camera_opacity));
+
+                            float r_cr = (state->camera_shape == 2) ? (c_w * 0.5f) : ((state->camera_shape == 1) ? state->camera_corner_radius : 0.0f);
+                            draw_list->AddImageRounded((ImTextureID)(intptr_t)cam_srv, p_min, p_max, uv0, uv1, tint_col, r_cr);
+
+                            if (state->camera_border_thickness > 0.0f) {
+                                draw_list->AddRect(p_min, p_max, state->camera_border_color, r_cr, 0, state->camera_border_thickness);
+                            }
+                        }
+                    }
                 } else {
                     const char* msg = is_recording
                         ? tr(lang,
@@ -3035,12 +3418,21 @@ tr(lang, "MOV (*.mov - Video Editing / QuickTime)", "MOV (*.mov - Монтаж �
                         ImGui::Spacing();
                         render_app_audio_mixer_ui(lang);
                     }
-                                        ImGui::EndChild();
+                    ImGui::EndChild();
                     ImGui::PopStyleColor();
                     ImGui::EndTabItem();
                 }
 
-                // SUB-TAB 3: Hotkeys & Overlay Indicator
+                if (ImGui::BeginTabItem(tr(lang, "Camera & Overlay", "Вебкамера та Оверлей", "摄像头与画中画", "Kamera & Overlay", "Caméra & Incrustation", "Kamera i Nakładka"))) {
+                    ImGui::Spacing();
+                    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.13f, 0.14f, 0.17f, 1.00f));
+                    ImGui::BeginChild("CameraSettingsCard", ImVec2(0, 0), true);
+                    render_camera_controls(state, lang);
+                    ImGui::EndChild();
+                    ImGui::PopStyleColor();
+                    ImGui::EndTabItem();
+                }
+
                 if (ImGui::BeginTabItem(tr(lang, "Hotkeys & Overlay", "Гарячі клавіші та Оверлей", "快捷键与悬浮窗", "Hotkeys & Overlay", "Raccourcis & Overlay", "Skróty i Nakładka"))) {
                     ImGui::Spacing();
                     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.13f, 0.14f, 0.17f, 1.00f));

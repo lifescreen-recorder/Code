@@ -283,6 +283,31 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
     ui_state.sys_comp_amount = cfg.audio.sys_comp_amount;
     ui_state.sys_gain_db = cfg.audio.sys_gain_db;
 
+    ui_state.camera_enabled = cfg.camera.enabled;
+    ui_state.camera_source_type = @intCast(cfg.camera.source_type);
+    ui_state.camera_device_index = @intCast(cfg.camera.device_index);
+    ui_state.camera_position = @intCast(cfg.camera.position);
+    ui_state.camera_pos_x = cfg.camera.pos_x_pct;
+    ui_state.camera_pos_y = cfg.camera.pos_y_pct;
+    ui_state.camera_margin_px = @intCast(cfg.camera.margin_px);
+    ui_state.camera_size_pct = cfg.camera.size_pct;
+    ui_state.camera_aspect_ratio = @intCast(cfg.camera.aspect_ratio);
+    ui_state.camera_shape = @intCast(cfg.camera.shape);
+    ui_state.camera_corner_radius = cfg.camera.corner_radius;
+    ui_state.camera_border_thickness = cfg.camera.border_thickness;
+    ui_state.camera_border_color = cfg.camera.border_color_rgba;
+    ui_state.camera_opacity = cfg.camera.opacity;
+    ui_state.camera_mirror = cfg.camera.mirror_horizontal;
+    ui_state.camera_chroma_key = cfg.camera.chroma_key;
+    ui_state.camera_chroma_color = cfg.camera.chroma_color_rgb;
+    ui_state.camera_chroma_sim = cfg.camera.chroma_similarity;
+    ui_state.camera_chroma_smooth = cfg.camera.chroma_smoothness;
+    if (cfg.camera.web_url.len > 0) {
+        const copy_len = @min(cfg.camera.web_url.len, ui_state.camera_web_url.len - 1);
+        @memcpy(ui_state.camera_web_url[0..copy_len], cfg.camera.web_url[0..copy_len]);
+        ui_state.camera_web_url[copy_len] = 0;
+    }
+
     ui_state.output_resolution = if (cfg.video.resolution_width == 1920 and cfg.video.resolution_height == 1080)
         1
     else if (cfg.video.resolution_width == 1280 and cfg.video.resolution_height == 720)
@@ -418,6 +443,11 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
                         if (maybe_frame) |frame| {
                             ui_state.preview_width = @intCast(frame.width);
                             ui_state.preview_height = @intCast(frame.height);
+                            if (app_window.imgui_camera_is_enabled()) {
+                                if (frame.gpu_texture_ptr) |tex| {
+                                    app_window.imgui_camera_composite_d3d11(tex, @intCast(frame.width), @intCast(frame.height));
+                                }
+                            }
                             app_window.imgui_update_preview_d3d11(frame.gpu_texture_ptr, @intCast(frame.width), @intCast(frame.height));
                         }
                     } else |_| {}
@@ -544,6 +574,25 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
             recorder_pipeline.cfg.audio.sys_compressor = ui_state.sys_compressor;
             recorder_pipeline.cfg.audio.sys_comp_amount = ui_state.sys_comp_amount;
             recorder_pipeline.cfg.audio.sys_gain_db = ui_state.sys_gain_db;
+            recorder_pipeline.cfg.camera.enabled = ui_state.camera_enabled;
+            recorder_pipeline.cfg.camera.source_type = @intCast(ui_state.camera_source_type);
+            recorder_pipeline.cfg.camera.device_index = @intCast(ui_state.camera_device_index);
+            recorder_pipeline.cfg.camera.position = @intCast(ui_state.camera_position);
+            recorder_pipeline.cfg.camera.pos_x_pct = ui_state.camera_pos_x;
+            recorder_pipeline.cfg.camera.pos_y_pct = ui_state.camera_pos_y;
+            recorder_pipeline.cfg.camera.margin_px = @intCast(ui_state.camera_margin_px);
+            recorder_pipeline.cfg.camera.size_pct = ui_state.camera_size_pct;
+            recorder_pipeline.cfg.camera.aspect_ratio = @intCast(ui_state.camera_aspect_ratio);
+            recorder_pipeline.cfg.camera.shape = @intCast(ui_state.camera_shape);
+            recorder_pipeline.cfg.camera.corner_radius = ui_state.camera_corner_radius;
+            recorder_pipeline.cfg.camera.border_thickness = ui_state.camera_border_thickness;
+            recorder_pipeline.cfg.camera.border_color_rgba = ui_state.camera_border_color;
+            recorder_pipeline.cfg.camera.opacity = ui_state.camera_opacity;
+            recorder_pipeline.cfg.camera.mirror_horizontal = ui_state.camera_mirror;
+            recorder_pipeline.cfg.camera.chroma_key = ui_state.camera_chroma_key;
+            recorder_pipeline.cfg.camera.chroma_color_rgb = ui_state.camera_chroma_color;
+            recorder_pipeline.cfg.camera.chroma_similarity = ui_state.camera_chroma_sim;
+            recorder_pipeline.cfg.camera.chroma_smoothness = ui_state.camera_chroma_smooth;
             recorder_pipeline.cfg.encoder.container = switch (ui_state.container_format) {
                 1 => .mp4,
                 2 => .mov,
@@ -625,6 +674,25 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
                 recorder_pipeline.cfg.audio.sys_compressor = ui_state.sys_compressor;
                 recorder_pipeline.cfg.audio.sys_comp_amount = ui_state.sys_comp_amount;
                 recorder_pipeline.cfg.audio.sys_gain_db = ui_state.sys_gain_db;
+                recorder_pipeline.cfg.camera.enabled = ui_state.camera_enabled;
+                recorder_pipeline.cfg.camera.source_type = @intCast(ui_state.camera_source_type);
+                recorder_pipeline.cfg.camera.device_index = @intCast(ui_state.camera_device_index);
+                recorder_pipeline.cfg.camera.position = @intCast(ui_state.camera_position);
+                recorder_pipeline.cfg.camera.pos_x_pct = ui_state.camera_pos_x;
+                recorder_pipeline.cfg.camera.pos_y_pct = ui_state.camera_pos_y;
+                recorder_pipeline.cfg.camera.margin_px = @intCast(ui_state.camera_margin_px);
+                recorder_pipeline.cfg.camera.size_pct = ui_state.camera_size_pct;
+                recorder_pipeline.cfg.camera.aspect_ratio = @intCast(ui_state.camera_aspect_ratio);
+                recorder_pipeline.cfg.camera.shape = @intCast(ui_state.camera_shape);
+                recorder_pipeline.cfg.camera.corner_radius = ui_state.camera_corner_radius;
+                recorder_pipeline.cfg.camera.border_thickness = ui_state.camera_border_thickness;
+                recorder_pipeline.cfg.camera.border_color_rgba = ui_state.camera_border_color;
+                recorder_pipeline.cfg.camera.opacity = ui_state.camera_opacity;
+                recorder_pipeline.cfg.camera.mirror_horizontal = ui_state.camera_mirror;
+                recorder_pipeline.cfg.camera.chroma_key = ui_state.camera_chroma_key;
+                recorder_pipeline.cfg.camera.chroma_color_rgb = ui_state.camera_chroma_color;
+                recorder_pipeline.cfg.camera.chroma_similarity = ui_state.camera_chroma_sim;
+                recorder_pipeline.cfg.camera.chroma_smoothness = ui_state.camera_chroma_smooth;
                 recorder_pipeline.cfg.encoder.container = switch (ui_state.container_format) {
                     1 => .mp4,
                     2 => .mov,

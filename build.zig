@@ -87,6 +87,7 @@ pub fn build(b: *std.Build) void {
         exe.root_module.addCSourceFile(.{ .file = b.path("vendor/cimgui/imgui/backends/imgui_impl_dx11.cpp"), .flags = imgui_flags });
         exe.root_module.addCSourceFile(.{ .file = b.path("vendor/cimgui/cimgui.cpp"), .flags = imgui_flags });
         exe.root_module.addCSourceFile(.{ .file = b.path("src/ui/imgui_bridge.cpp"), .flags = bridge_flags });
+        exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/windows/camera_engine.cpp"), .flags = bridge_flags });
 
         exe.root_module.addIncludePath(b.path("vendor/ffmpeg/include"));
         exe.root_module.addIncludePath(b.path("src/platform/windows"));
@@ -114,6 +115,10 @@ pub fn build(b: *std.Build) void {
         exe.root_module.linkSystemLibrary("ole32", .{});
         exe.root_module.linkSystemLibrary("kernel32", .{});
         exe.root_module.linkSystemLibrary("winmm", .{});
+        exe.root_module.linkSystemLibrary("mf", .{});
+        exe.root_module.linkSystemLibrary("mfplat", .{});
+        exe.root_module.linkSystemLibrary("mfreadwrite", .{});
+        exe.root_module.linkSystemLibrary("mfuuid", .{});
 
         // 2b. Game Hook 64-bit DLL (Windows only)
         const hook_dll = b.addLibrary(.{

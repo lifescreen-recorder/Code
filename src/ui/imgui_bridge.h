@@ -136,6 +136,29 @@ typedef struct {
     bool sys_compressor;
     float sys_comp_amount;
     float sys_gain_db;
+
+    bool camera_enabled;
+    int camera_source_type;
+    int camera_device_index;
+    const char* const* camera_device_names;
+    int camera_device_count;
+    char camera_web_url[512];
+    int camera_position;
+    float camera_pos_x;
+    float camera_pos_y;
+    int camera_margin_px;
+    float camera_size_pct;
+    int camera_aspect_ratio;
+    int camera_shape;
+    float camera_corner_radius;
+    float camera_border_thickness;
+    uint32_t camera_border_color;
+    float camera_opacity;
+    bool camera_mirror;
+    bool camera_chroma_key;
+    uint32_t camera_chroma_color;
+    float camera_chroma_sim;
+    float camera_chroma_smooth;
 } UiState;
 
 // Native Win32 Window & DX11 LifeCycle
@@ -156,6 +179,10 @@ void imgui_update_preview_d3d11(void* d3d11_texture, int width, int height);
 void imgui_update_preview_bgra(const uint8_t* bgra_data, int width, int height, int stride);
 void imgui_set_preview_enabled(bool enabled);
 bool imgui_is_preview_enabled(void);
+
+void imgui_camera_composite_d3d11(void* dest_texture, int screen_w, int screen_h);
+void imgui_camera_composite_sw_frame(uint8_t* dst_y, uint8_t* dst_uv, int stride_y, int stride_uv, int width, int height, bool is_nv12);
+bool imgui_camera_is_enabled(void);
 
 #ifdef __cplusplus
 }

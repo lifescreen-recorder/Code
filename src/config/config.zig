@@ -130,6 +130,29 @@ pub const HotkeysConfig = struct {
     pause_toggle: []const u8 = "F10",
 };
 
+pub const CameraConfig = struct {
+    enabled: bool = false,
+    source_type: u32 = 0,
+    device_index: u32 = 0,
+    web_url: []const u8 = "",
+    position: u32 = 0,
+    pos_x_pct: f32 = 0.80,
+    pos_y_pct: f32 = 0.75,
+    margin_px: u32 = 24,
+    size_pct: f32 = 0.22,
+    aspect_ratio: u32 = 0,
+    shape: u32 = 1,
+    corner_radius: f32 = 16.0,
+    border_thickness: f32 = 3.0,
+    border_color_rgba: u32 = 0x0EA5E9FF,
+    opacity: f32 = 1.0,
+    mirror_horizontal: bool = false,
+    chroma_key: bool = false,
+    chroma_color_rgb: u32 = 0x00FF00,
+    chroma_similarity: f32 = 0.40,
+    chroma_smoothness: f32 = 0.10,
+};
+
 pub const UIConfig = struct {
     theme: []const u8 = "dark",
     start_minimized: bool = false,
@@ -142,6 +165,7 @@ pub const Config = struct {
     video: VideoConfig = .{},
     encoder: EncoderConfig = .{},
     audio: AudioConfig = .{},
+    camera: CameraConfig = .{},
     output: OutputConfig = .{},
     hotkeys: HotkeysConfig = .{},
     ui: UIConfig = .{},

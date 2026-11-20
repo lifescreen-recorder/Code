@@ -285,6 +285,12 @@ pub const Pipeline = struct {
                 last_valid_frame = frame;
                 _ = self.stats.captured_frames.fetchAdd(1, .monotonic);
 
+                if (app_window.imgui_camera_is_enabled()) {
+                    if (frame.gpu_texture_ptr) |tex| {
+                        app_window.imgui_camera_composite_d3d11(tex, @intCast(frame.width), @intCast(frame.height));
+                    }
+                }
+
                 if (frame_idx % 2 == 0 and !self.cfg.video.low_end_mode and app_window.imgui_is_preview_enabled()) {
                     app_window.imgui_update_preview_d3d11(frame.gpu_texture_ptr, @intCast(frame.width), @intCast(frame.height));
                 }
