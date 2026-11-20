@@ -1,3 +1,14 @@
+## [v0.1.2] - 2026-11-20
+
+### Changes:
+* feat(camera): add webcam and web overlay with live preview and d3d11 compositing ([051f25f](https://github.com/lifescreen-recorder/Code/commit/051f25fa51b6f515d4dd593ea4f30818f2321ea0)) by @BANSAFAn
+* perf(video): fix 60fps drops, cursor duplication, add audio dsp testing, embed app icon and polish ui ([f44590d](https://github.com/lifescreen-recorder/Code/commit/f44590d6cf0d3f780573cd18ceb2a31d73231257)) by @BANSAFAn
+* feat: add weak-PC 1080p30 optimization, multi-track audio capture, and voice DSP chain ([3ef95d8](https://github.com/lifescreen-recorder/Code/commit/3ef95d8485bb2bb0086d6e424b59ab2a038cefbd)) by @BANSAFAn
+* Merge pull request #4 from lifescreen-recorder/copilot/lifescreen-recorderimprove-screen-optimization ([d68f47d](https://github.com/lifescreen-recorder/Code/commit/d68f47d79ea24f17f00cd70f6dc96c0f748227d0)) by @BANERONETWo
+* Optimize preview copy and harden game frame sizing ([fb51812](https://github.com/lifescreen-recorder/Code/commit/fb5181280478922759b054e9b02a361e91c86727)) by @copilot-swe-agent[bot]
+* Fix WGC full-frame capture resizing ([3f256db](https://github.com/lifescreen-recorder/Code/commit/3f256dbf6da9aaedd2c56e1563977abb8fa6a9dd)) by @copilot-swe-agent[bot]
+* Initial plan ([dc1f989](https://github.com/lifescreen-recorder/Code/commit/dc1f9899489917d3fab0fb87de85cfec5c6b6403)) by @copilot-swe-agent[bot]
+
 ## [v0.1.1] - 2026-10-28
 
 ### Changes:
