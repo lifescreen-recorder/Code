@@ -20,6 +20,8 @@ pub const LifeScreenHookIpc = extern struct {
     timestamp_qpc: u64,
     active: bool,
     recording: bool,
+    pad: [2]u8 = .{ 0, 0 },
+    graphics_api: u32 = 0,
 };
 
 extern "kernel32" fn OpenFileMappingA(dwDesiredAccess: u32, bInheritHandle: i32, lpName: [*:0]const u8) callconv(.winapi) ?*anyopaque;
@@ -109,8 +111,17 @@ pub const GameCapture = struct {
 
         try self.reopenSharedTexture();
 
-        log.info("Game capture initialized successfully for PID {d}: {d}x{d}, handle=0x{x}", .{
+        const api_name = switch (self.ipc_ptr.?.graphics_api) {
+            1 => "DirectX 11",
+            2 => "DirectX 12",
+            3 => "OpenGL",
+            4 => "Vulkan",
+            else => "GPU",
+        };
+
+        log.info("Game capture initialized successfully for PID {d} [{s}]: {d}x{d}, handle=0x{x}", .{
             pid,
+            api_name,
             self.width,
             self.height,
             self.current_shared_handle,

@@ -13,6 +13,49 @@ const log = std.log.scoped(.capture_backend);
 
 pub const POINT = extern struct { x: i32, y: i32 };
 pub extern "user32" fn MonitorFromPoint(pt: POINT, dwFlags: u32) callconv(.winapi) ?*anyopaque;
+pub extern "user32" fn GetDC(hWnd: ?*anyopaque) callconv(.winapi) ?*anyopaque;
+pub extern "user32" fn ReleaseDC(hWnd: ?*anyopaque, hDC: ?*anyopaque) callconv(.winapi) i32;
+pub extern "gdi32" fn GetPixelFormat(hdc: ?*anyopaque) callconv(.winapi) i32;
+pub extern "gdi32" fn DescribePixelFormat(hdc: ?*anyopaque, iPixelFormat: i32, nBytes: u32, ppfd: ?*PIXELFORMATDESCRIPTOR) callconv(.winapi) i32;
+
+pub const PIXELFORMATDESCRIPTOR = extern struct {
+    nSize: u16 = @sizeOf(PIXELFORMATDESCRIPTOR),
+    nVersion: u16 = 1,
+    dwFlags: u32 = 0,
+    iPixelType: u8 = 0,
+    cColorBits: u8 = 0,
+    cRedBits: u8 = 0,
+    cRedShift: u8 = 0,
+    cGreenBits: u8 = 0,
+    cGreenShift: u8 = 0,
+    cBlueBits: u8 = 0,
+    cBlueShift: u8 = 0,
+    cAlphaBits: u8 = 0,
+    cAlphaShift: u8 = 0,
+    cAccumBits: u8 = 0,
+    cAccumRedBits: u8 = 0,
+    cAccumGreenBits: u8 = 0,
+    cAccumBlueBits: u8 = 0,
+    cAccumAlphaBits: u8 = 0,
+    cDepthBits: u8 = 0,
+    cStencilBits: u8 = 0,
+    cAuxBuffers: u8 = 0,
+    iLayerType: u8 = 0,
+    bReserved: u8 = 0,
+    dwLayerMask: u32 = 0,
+    dwVisibleMask: u32 = 0,
+    dwDamageMask: u32 = 0,
+};
+
+fn isOpenGlWindow(hwnd: ?*anyopaque) bool {
+    const hdc = GetDC(hwnd) orelse return false;
+    defer _ = ReleaseDC(hwnd, hdc);
+    const fmt = GetPixelFormat(hdc);
+    if (fmt <= 0) return false;
+    var pfd = PIXELFORMATDESCRIPTOR{};
+    if (DescribePixelFormat(hdc, fmt, @sizeOf(PIXELFORMATDESCRIPTOR), &pfd) <= 0) return false;
+    return (pfd.dwFlags & 0x00000020) != 0;
+}
 
 pub const CaptureBackend = struct {
     pub const BackendType = enum {
@@ -97,10 +140,25 @@ pub const CaptureBackend = struct {
             .game => {
                 if (target.window_handle) |hwnd_val| {
                     const hwnd: *anyopaque = @ptrFromInt(hwnd_val);
+                    const is_ogl = isOpenGlWindow(hwnd);
+                    if (is_ogl and wgc.WgcCapture.isSupported()) {
+                        log.info("Detected OpenGL surface on target window; activating Hardware Composed Flip WGC capture...", .{});
+                        if (wgc.WgcCapture.initWindow(hwnd, .{
+                            .capture_cursor = target.capture_cursor,
+                            .draw_border = false,
+                        })) |cap| {
+                            return CaptureBackend{
+                                .backend_type = .wgc,
+                                .wgc_cap = cap,
+                                .width = cap.width,
+                                .height = cap.height,
+                            };
+                        } else |_| {}
+                    }
                     const pid = injector.getProcessIdFromHwnd(hwnd);
                     if (pid != 0) {
                         log.info("Attempting Game Hook capture on target PID {d}...", .{pid});
-                        if (game.GameCapture.init(pid, 1500)) |gcap| {
+                        if (game.GameCapture.init(pid, if (is_ogl) 400 else 1000)) |gcap| {
                             log.info("Game Hook attached successfully!", .{});
                             return CaptureBackend{
                                 .backend_type = .game,

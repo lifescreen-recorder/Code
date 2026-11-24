@@ -176,14 +176,24 @@ static void CaptureFrame(IDXGISwapChain* pSwapChain) {
                     g_pIpc->width = desc.Width;
                     g_pIpc->height = desc.Height;
                     g_pIpc->format = (uint32_t)desc.Format;
+                    if (GetModuleHandleA("vulkan-1.dll")) {
+                        g_pIpc->graphics_api = LIFESCREEN_API_VULKAN;
+                    } else if (GetModuleHandleA("opengl32.dll")) {
+                        g_pIpc->graphics_api = LIFESCREEN_API_OPENGL;
+                    } else {
+                        g_pIpc->graphics_api = LIFESCREEN_API_D3D11;
+                    }
                     g_pIpc->active = true;
                 }
             }
         }
 
-        // Zero-copy GPU-to-GPU copy into shared texture
         if (g_pSharedTexture) {
-            pContext->CopyResource(g_pSharedTexture, pBackBuffer);
+            if (desc.SampleDesc.Count > 1) {
+                pContext->ResolveSubresource(g_pSharedTexture, 0, pBackBuffer, 0, desc.Format);
+            } else {
+                pContext->CopyResource(g_pSharedTexture, pBackBuffer);
+            }
             g_pIpc->frame_index++;
             QueryPerformanceCounter((LARGE_INTEGER*)&g_pIpc->timestamp_qpc);
             if (g_hFrameEvent) {
@@ -306,6 +316,114 @@ static DWORD WINAPI HookInitThread(LPVOID lpParam) {
 
     DestroyWindow(dummyHwnd);
     UnregisterClassA("LifeScreenDummyHookClass", wc.hInstance);
+    return 0;
+}
+
+typedef void (*PFN_vkVoidFunction)(void);
+typedef PFN_vkVoidFunction (WINAPI *PFN_vkGetInstanceProcAddr)(void* instance, const char* pName);
+typedef PFN_vkVoidFunction (WINAPI *PFN_vkGetDeviceProcAddr)(void* device, const char* pName);
+typedef int32_t (WINAPI *PFN_vkQueuePresentKHR)(void* queue, const void* pPresentInfo);
+typedef int32_t (WINAPI *PFN_vkCreateSwapchainKHR)(void* device, const void* pCreateInfo, const void* pAllocator, uint64_t* pSwapchain);
+
+typedef struct VkNegotiateLayerInterface {
+    int32_t sType;
+    void* pNext;
+    uint32_t loaderLayerInterfaceVersion;
+    PFN_vkGetInstanceProcAddr pfnGetInstanceProcAddr;
+    PFN_vkGetDeviceProcAddr pfnGetDeviceProcAddr;
+    PFN_vkVoidFunction pfnGetPhysicalDeviceProcAddr;
+} VkNegotiateLayerInterface;
+
+typedef struct VkSwapchainCreateInfoHeader {
+    int32_t sType;
+    const void* pNext;
+    uint32_t flags;
+    uint64_t surface;
+    uint32_t minImageCount;
+    int32_t imageFormat;
+    int32_t imageColorSpace;
+    uint32_t imageExtentWidth;
+    uint32_t imageExtentHeight;
+    uint32_t imageArrayLayers;
+    uint32_t imageUsage;
+} VkSwapchainCreateInfoHeader;
+
+static PFN_vkGetInstanceProcAddr g_NextGetInstanceProcAddr = NULL;
+static PFN_vkGetDeviceProcAddr g_NextGetDeviceProcAddr = NULL;
+static PFN_vkCreateSwapchainKHR g_NextCreateSwapchainKHR = NULL;
+static PFN_vkQueuePresentKHR g_NextQueuePresentKHR = NULL;
+static uint32_t g_vkSwapWidth = 0;
+static uint32_t g_vkSwapHeight = 0;
+
+static int32_t WINAPI Layer_vkCreateSwapchainKHR(void* device, const void* pCreateInfo, const void* pAllocator, uint64_t* pSwapchain) {
+    if (pCreateInfo) {
+        const VkSwapchainCreateInfoHeader* hdr = (const VkSwapchainCreateInfoHeader*)pCreateInfo;
+        g_vkSwapWidth = hdr->imageExtentWidth;
+        g_vkSwapHeight = hdr->imageExtentHeight;
+        if (g_pIpc) {
+            g_pIpc->graphics_api = LIFESCREEN_API_VULKAN;
+            g_pIpc->width = g_vkSwapWidth;
+            g_pIpc->height = g_vkSwapHeight;
+        }
+    }
+    if (g_NextCreateSwapchainKHR) {
+        return g_NextCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
+    }
+    return -1;
+}
+
+static int32_t WINAPI Layer_vkQueuePresentKHR(void* queue, const void* pPresentInfo) {
+    if (g_pIpc && g_vkSwapWidth > 0 && g_vkSwapHeight > 0) {
+        g_pIpc->graphics_api = LIFESCREEN_API_VULKAN;
+        g_pIpc->frame_index++;
+        QueryPerformanceCounter((LARGE_INTEGER*)&g_pIpc->timestamp_qpc);
+        if (g_hFrameEvent && g_pIpc->shared_handle != 0) {
+            SetEvent(g_hFrameEvent);
+        }
+    }
+    if (g_NextQueuePresentKHR) {
+        return g_NextQueuePresentKHR(queue, pPresentInfo);
+    }
+    return 0;
+}
+
+extern "C" __declspec(dllexport) PFN_vkVoidFunction WINAPI LifeScreen_GetDeviceProcAddr(void* device, const char* pName) {
+    if (pName) {
+        if (strcmp(pName, "vkGetDeviceProcAddr") == 0) return (PFN_vkVoidFunction)LifeScreen_GetDeviceProcAddr;
+        if (strcmp(pName, "vkCreateSwapchainKHR") == 0) {
+            if (g_NextGetDeviceProcAddr && device) {
+                g_NextCreateSwapchainKHR = (PFN_vkCreateSwapchainKHR)g_NextGetDeviceProcAddr(device, "vkCreateSwapchainKHR");
+            }
+            return (PFN_vkVoidFunction)Layer_vkCreateSwapchainKHR;
+        }
+        if (strcmp(pName, "vkQueuePresentKHR") == 0) {
+            if (g_NextGetDeviceProcAddr && device) {
+                g_NextQueuePresentKHR = (PFN_vkQueuePresentKHR)g_NextGetDeviceProcAddr(device, "vkQueuePresentKHR");
+            }
+            return (PFN_vkVoidFunction)Layer_vkQueuePresentKHR;
+        }
+    }
+    if (g_NextGetDeviceProcAddr) return g_NextGetDeviceProcAddr(device, pName);
+    return NULL;
+}
+
+extern "C" __declspec(dllexport) PFN_vkVoidFunction WINAPI LifeScreen_GetInstanceProcAddr(void* instance, const char* pName) {
+    if (pName) {
+        if (strcmp(pName, "vkGetInstanceProcAddr") == 0) return (PFN_vkVoidFunction)LifeScreen_GetInstanceProcAddr;
+        if (strcmp(pName, "vkGetDeviceProcAddr") == 0) return (PFN_vkVoidFunction)LifeScreen_GetDeviceProcAddr;
+    }
+    if (g_NextGetInstanceProcAddr) return g_NextGetInstanceProcAddr(instance, pName);
+    return NULL;
+}
+
+extern "C" __declspec(dllexport) int32_t WINAPI vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface* pVersionStruct) {
+    if (!pVersionStruct || pVersionStruct->sType != 2) return -1;
+    if (pVersionStruct->loaderLayerInterfaceVersion > 2) {
+        pVersionStruct->loaderLayerInterfaceVersion = 2;
+    }
+    pVersionStruct->pfnGetInstanceProcAddr = LifeScreen_GetInstanceProcAddr;
+    pVersionStruct->pfnGetDeviceProcAddr = LifeScreen_GetDeviceProcAddr;
+    pVersionStruct->pfnGetPhysicalDeviceProcAddr = NULL;
     return 0;
 }
 

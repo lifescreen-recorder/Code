@@ -70,6 +70,10 @@ pub fn build(b: *std.Build) void {
             .file = b.path("src/platform/windows/wgc_bridge.c"),
             .flags = &[_][]const u8{ "-std=c11", "-O2" },
         });
+        exe.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/windows/process_audio.c"),
+            .flags = &[_][]const u8{ "-std=c11", "-O2" },
+        });
 
         const app_version = std.mem.trim(u8, @embedFile("VERSION"), " \r\n\t");
         const imgui_flags = &[_][]const u8{ "-std=c++17", "-O2" };
@@ -119,6 +123,9 @@ pub fn build(b: *std.Build) void {
         exe.root_module.linkSystemLibrary("mfplat", .{});
         exe.root_module.linkSystemLibrary("mfreadwrite", .{});
         exe.root_module.linkSystemLibrary("mfuuid", .{});
+        exe.root_module.linkSystemLibrary("winhttp", .{});
+        exe.root_module.linkSystemLibrary("windowscodecs", .{});
+        exe.root_module.linkSystemLibrary("comdlg32", .{});
 
         // 2b. Game Hook 64-bit DLL (Windows only)
         const hook_dll = b.addLibrary(.{
@@ -141,8 +148,10 @@ pub fn build(b: *std.Build) void {
         hook_dll.root_module.linkSystemLibrary("dxgi", .{});
         hook_dll.root_module.linkSystemLibrary("kernel32", .{});
         hook_dll.root_module.linkSystemLibrary("user32", .{});
+        hook_dll.root_module.linkSystemLibrary("gdi32", .{});
 
         b.installArtifact(hook_dll);
+        b.installBinFile("resources/lifescreen_vulkan_layer.json", "lifescreen_vulkan_layer.json");
     } else if (is_linux) {
         // Linux platform linking
         exe.root_module.linkSystemLibrary("c", .{});
@@ -179,6 +188,10 @@ pub fn build(b: *std.Build) void {
     if (is_windows) {
         unit_tests.root_module.addCSourceFile(.{
             .file = b.path("src/platform/windows/wgc_bridge.c"),
+            .flags = &[_][]const u8{ "-std=c11", "-O2" },
+        });
+        unit_tests.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/windows/process_audio.c"),
             .flags = &[_][]const u8{ "-std=c11", "-O2" },
         });
         unit_tests.root_module.addIncludePath(b.path("src/platform/windows"));

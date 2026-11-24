@@ -106,11 +106,14 @@ pub const UiState = extern struct {
     mic_audio_level2: f32 = 0.0,
 
     mic_noise_suppression: bool = false,
-    mic_ns_strength: f32 = 0.5,
+    mic_ns_mode: c_int = 0,
+    mic_ns_strength: f32 = 0.65,
     mic_compressor: bool = false,
     mic_comp_amount: f32 = 0.5,
     mic_gain_db: f32 = 0.0,
 
+    sys_audio_mode: c_int = 0,
+    sys_target_pid: u32 = 0,
     sys_clarity_filter: bool = false,
     sys_compressor: bool = false,
     sys_comp_amount: f32 = 0.5,
@@ -134,10 +137,19 @@ pub const UiState = extern struct {
     camera_border_color: u32 = 0x0EA5E9FF,
     camera_opacity: f32 = 1.0,
     camera_mirror: bool = false,
+    camera_flip_vertical: bool = false,
     camera_chroma_key: bool = false,
     camera_chroma_color: u32 = 0x00FF00,
     camera_chroma_sim: f32 = 0.40,
     camera_chroma_smooth: f32 = 0.10,
+    camera_brightness: f32 = 0.0,
+    camera_contrast: f32 = 1.0,
+    camera_saturation: f32 = 1.0,
+    camera_sharpness: f32 = 0.25,
+    camera_denoise: f32 = 0.25,
+    camera_color_filter: c_int = 0,
+    camera_vignette: f32 = 0.0,
+    camera_glow: bool = false,
 };
 
 extern fn imgui_window_create(width: c_int, height: c_int, title: [*:0]const u8) callconv(.c) bool;

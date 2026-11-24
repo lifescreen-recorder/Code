@@ -25,10 +25,19 @@ typedef struct {
     uint32_t border_color;
     float opacity;
     bool mirror;
+    bool flip_vertical;
     bool chroma_key;
     uint32_t chroma_color;
     float chroma_similarity;
     float chroma_smoothness;
+    float brightness;
+    float contrast;
+    float saturation;
+    float sharpness;
+    float denoise;
+    int color_filter;
+    float vignette;
+    bool glow;
     char web_url[512];
 } CameraOverlayConfig;
 
@@ -42,6 +51,7 @@ const char* const* camera_engine_get_device_names(void);
 void camera_engine_start(int source_type, int device_index, const char* web_url);
 void camera_engine_stop(void);
 bool camera_engine_is_running(void);
+void camera_engine_reload_web(void);
 
 void camera_engine_update_settings(const CameraOverlayConfig* cfg);
 void camera_engine_get_settings(CameraOverlayConfig* out_cfg);

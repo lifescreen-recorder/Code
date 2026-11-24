@@ -127,11 +127,14 @@ typedef struct {
     float mic_audio_level2;
 
     bool mic_noise_suppression;
+    int mic_ns_mode;
     float mic_ns_strength;
     bool mic_compressor;
     float mic_comp_amount;
     float mic_gain_db;
 
+    int sys_audio_mode;
+    uint32_t sys_target_pid;
     bool sys_clarity_filter;
     bool sys_compressor;
     float sys_comp_amount;
@@ -155,10 +158,19 @@ typedef struct {
     uint32_t camera_border_color;
     float camera_opacity;
     bool camera_mirror;
+    bool camera_flip_vertical;
     bool camera_chroma_key;
     uint32_t camera_chroma_color;
     float camera_chroma_sim;
     float camera_chroma_smooth;
+    float camera_brightness;
+    float camera_contrast;
+    float camera_saturation;
+    float camera_sharpness;
+    float camera_denoise;
+    int camera_color_filter;
+    float camera_vignette;
+    bool camera_glow;
 } UiState;
 
 // Native Win32 Window & DX11 LifeCycle

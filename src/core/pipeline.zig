@@ -8,11 +8,16 @@ const config = @import("../config/config.zig");
 const audio_dsp = @import("audio_dsp.zig");
 
 const capture_backend = @import("../platform/windows/capture_backend.zig");
+const injector = @import("../platform/windows/hook/injector.zig");
 const wasapi = @import("../platform/windows/wasapi_audio.zig");
 const encoder = @import("../encoders/ffmpeg_encoder.zig");
 const muxer = @import("../encoders/muxer.zig");
 const wav_writer = @import("../encoders/wav_writer.zig");
 const app_window = @import("../ui/app_window.zig");
+
+extern fn process_audio_open(target_pid: u32, exclude_process: bool) callconv(.c) ?*anyopaque;
+extern fn process_audio_read(handle: ?*anyopaque, out_samples: [*]f32, max_floats: u32, out_peak: *f32) callconv(.c) u32;
+extern fn process_audio_close(handle: ?*anyopaque) callconv(.c) void;
 
 const log = std.log.scoped(.pipeline);
 const THREAD_PRIORITY_HIGHEST = 2;
@@ -90,6 +95,7 @@ pub const Pipeline = struct {
 
     frame_ring: FrameRing = .init(),
     frame_ready_event: ?*anyopaque = null,
+    active_target_pid: u32 = 0,
 
     // Pipeline engine objects
     cap: ?capture_backend.CaptureBackend = null,
@@ -122,6 +128,10 @@ pub const Pipeline = struct {
         errdefer self.stats.state.store(.idle, .release);
 
         self.frame_ring.reset();
+        self.active_target_pid = if (target.window_handle) |hw|
+            injector.getProcessIdFromHwnd(@ptrFromInt(hw))
+        else
+            0;
 
         // 1. Initialize Capture Backend (DXGI for screen, WGC for window/monitor)
         var capture = try capture_backend.CaptureBackend.init(target);
@@ -471,6 +481,7 @@ pub const Pipeline = struct {
         track: i32 = -1,
         peak: f32 = 0.0,
         capture: ?wasapi.WasapiCapture = null,
+        proc_capture: ?*anyopaque = null,
         fifo: AudioFifo = .{},
         dsp: audio_dsp.VoiceChain = audio_dsp.VoiceChain.init(48000.0),
         sys_dsp: audio_dsp.SystemChain = audio_dsp.SystemChain.init(48000.0),
@@ -547,8 +558,33 @@ pub const Pipeline = struct {
             }
         }
 
-        for (&sources) |*src| {
+        for (&sources, 0..) |*src, s_idx| {
             if (!src.enabled) continue;
+
+            if (s_idx == 0 and !src.is_mic and (self.cfg.audio.sys_audio_mode == 1 or self.cfg.audio.sys_audio_mode == 2)) {
+                const chosen_pid = if (self.cfg.audio.sys_target_pid != 0)
+                    self.cfg.audio.sys_target_pid
+                else
+                    self.active_target_pid;
+                if (chosen_pid != 0) {
+                    const exclude = (self.cfg.audio.sys_audio_mode == 2);
+                    if (process_audio_open(chosen_pid, exclude)) |ph| {
+                        src.proc_capture = ph;
+                        src.sys_dsp = audio_dsp.SystemChain.init(48000.0);
+                        src.sys_dsp.configureSystemChain(
+                            48000.0,
+                            self.cfg.audio.sys_clarity_filter,
+                            self.cfg.audio.sys_compressor,
+                            self.cfg.audio.sys_comp_amount,
+                            self.cfg.audio.sys_gain_db,
+                            src.volume,
+                        );
+                        log.info("Per-Process WASAPI Audio active for PID {d} (exclude={any})", .{ chosen_pid, exclude });
+                        continue;
+                    }
+                }
+            }
+
             const cap = if (src.is_mic)
                 wasapi.WasapiCapture.initCapture(src.device_index)
             else
@@ -557,9 +593,10 @@ pub const Pipeline = struct {
                 src.capture = c;
                 if (src.is_mic) {
                     src.dsp = audio_dsp.VoiceChain.init(@floatFromInt(c.sample_rate));
-                    src.dsp.configureMicChain(
+                    src.dsp.configureMicChainEx(
                         @floatFromInt(c.sample_rate),
                         self.cfg.audio.mic_noise_suppression,
+                        self.cfg.audio.mic_ns_mode,
                         self.cfg.audio.mic_ns_strength,
                         self.cfg.audio.mic_compressor,
                         self.cfg.audio.mic_comp_amount,
@@ -588,11 +625,14 @@ pub const Pipeline = struct {
             }
         }
         defer for (&sources) |*src| {
+            if (src.proc_capture) |ph| process_audio_close(ph);
             if (src.capture) |*cap| cap.deinit();
         };
 
         for (&sources) |*src| {
-            if (src.capture) |*c| {
+            if (src.proc_capture) |ph| {
+                while (process_audio_read(ph, &src.buffer, @intCast(src.buffer.len), &src.peak) > 0) {}
+            } else if (src.capture) |*c| {
                 while (c.readSamples(&src.buffer, &src.peak) > 0) {}
             }
         }
@@ -618,6 +658,7 @@ pub const Pipeline = struct {
 
             const cur_audio_cfg = self.cfg.audio;
             const dsp_changed = (cur_audio_cfg.mic_noise_suppression != prev_audio_cfg.mic_noise_suppression) or
+                (cur_audio_cfg.mic_ns_mode != prev_audio_cfg.mic_ns_mode) or
                 (cur_audio_cfg.mic_ns_strength != prev_audio_cfg.mic_ns_strength) or
                 (cur_audio_cfg.mic_compressor != prev_audio_cfg.mic_compressor) or
                 (cur_audio_cfg.mic_comp_amount != prev_audio_cfg.mic_comp_amount) or
@@ -643,17 +684,26 @@ pub const Pipeline = struct {
             var mic_peak: f32 = 0.0;
             for (&sources) |*src| {
                 if (!src.enabled) continue;
-                if (src.capture == null) continue;
-                const capture = &src.capture.?;
-                const raw_count = capture.readSamples(&src.buffer, &src.peak);
+                var raw_count: u32 = 0;
+                var src_sr: u32 = MIX_SAMPLE_RATE;
+                if (src.proc_capture) |ph| {
+                    raw_count = process_audio_read(ph, &src.buffer, @intCast(src.buffer.len), &src.peak);
+                    src_sr = MIX_SAMPLE_RATE;
+                } else if (src.capture) |*capture| {
+                    raw_count = capture.readSamples(&src.buffer, &src.peak);
+                    src_sr = capture.sample_rate;
+                } else {
+                    continue;
+                }
                 if (raw_count == 0) continue;
                 did_read = true;
 
                 if (src.is_mic) {
                     if (dsp_changed) {
-                        src.dsp.configureMicChain(
-                            @floatFromInt(capture.sample_rate),
+                        src.dsp.configureMicChainEx(
+                            @floatFromInt(src_sr),
                             cur_audio_cfg.mic_noise_suppression,
+                            cur_audio_cfg.mic_ns_mode,
                             cur_audio_cfg.mic_ns_strength,
                             cur_audio_cfg.mic_compressor,
                             cur_audio_cfg.mic_comp_amount,
@@ -665,7 +715,7 @@ pub const Pipeline = struct {
                 } else {
                     if (dsp_changed) {
                         src.sys_dsp.configureSystemChain(
-                            @floatFromInt(capture.sample_rate),
+                            @floatFromInt(src_sr),
                             cur_audio_cfg.sys_clarity_filter,
                             cur_audio_cfg.sys_compressor,
                             cur_audio_cfg.sys_comp_amount,
@@ -677,10 +727,10 @@ pub const Pipeline = struct {
                 }
 
                 var out_samples: []f32 = undefined;
-                if (capture.sample_rate != MIX_SAMPLE_RATE) {
+                if (src_sr != MIX_SAMPLE_RATE) {
                     const converted = resampleLinear(
                         src.buffer[0..raw_count],
-                        capture.sample_rate,
+                        src_sr,
                         &src.resample_buffer,
                         MIX_SAMPLE_RATE,
                         2,
