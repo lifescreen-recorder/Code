@@ -13,6 +13,7 @@
 #include "camera_engine.h"
 
 static bool s_mfInitialized = false;
+static bool s_devicesInitialized = false;
 static CameraOverlayConfig s_config = {
     false, 0, 0, 0, 0.80f, 0.75f, 24, 0.22f, 0, 1, 16.0f, 3.0f, 0x0EA5E9FF, 1.0f, false, false, 0x00FF00, 0.40f, 0.10f, {0}
 };
@@ -126,7 +127,10 @@ const char* const* camera_engine_get_device_names(void) {
 void camera_engine_init(void) {
     ensure_cs();
     ensure_mf();
-    camera_engine_refresh_devices();
+    if (!s_devicesInitialized) {
+        s_devicesInitialized = true;
+        camera_engine_refresh_devices();
+    }
 }
 
 void camera_engine_shutdown(void) {
@@ -306,11 +310,18 @@ static DWORD WINAPI camera_capture_worker(LPVOID lpParam) {
                     if (SUCCEEDED(pBuffer->Lock(&pData, &maxLen, &curLen))) {
                         IMFMediaType* pCurType = NULL;
                         UINT32 w = def_w, h = def_h;
+                        LONG stride = 0;
                         if (SUCCEEDED(pReader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &pCurType))) {
                             MFGetAttributeSize(pCurType, MF_MT_FRAME_SIZE, &w, &h);
+                            UINT32 raw_stride = 0;
+                            if (SUCCEEDED(pCurType->GetUINT32(MF_MT_DEFAULT_STRIDE, &raw_stride))) {
+                                stride = (LONG)raw_stride;
+                            }
                             pCurType->Release();
                         }
-                        if (w > 0 && h > 0 && curLen >= w * h * 4) {
+                        if (stride == 0) stride = (LONG)(w * 4);
+                        LONG abs_stride = (stride < 0) ? -stride : stride;
+                        if (w > 0 && h > 0 && curLen >= (DWORD)(abs_stride * (LONG)h)) {
                             EnterCriticalSection(&s_frameCs);
                             if (s_camRawW != (int)w || s_camRawH != (int)h) {
                                 if (s_camRawBuffer) free(s_camRawBuffer);
@@ -319,7 +330,14 @@ static DWORD WINAPI camera_capture_worker(LPVOID lpParam) {
                                 s_camRawH = (int)h;
                             }
                             if (s_camRawBuffer) {
-                                memcpy(s_camRawBuffer, pData, w * h * 4);
+                                for (UINT32 y = 0; y < h; y++) {
+                                    UINT32 src_y = (stride < 0) ? (h - 1 - y) : y;
+                                    const uint32_t* src_row = (const uint32_t*)(pData + (size_t)src_y * (size_t)abs_stride);
+                                    uint32_t* dst_row = (uint32_t*)(s_camRawBuffer + (size_t)y * (size_t)w * 4);
+                                    for (UINT32 x = 0; x < w; x++) {
+                                        dst_row[x] = src_row[x] | 0xFF000000U;
+                                    }
+                                }
                                 s_camFrameIndex++;
                             }
                             LeaveCriticalSection(&s_frameCs);
@@ -552,7 +570,11 @@ void camera_engine_composite_d3d11(void* d3d11_device, void* d3d11_context, void
     float center_x = (float)dst_w * 0.5f;
     float center_y = (float)dst_h * 0.5f;
 
-    uint32_t b_col = cfg.border_color;
+    uint32_t br = (cfg.border_color >> 24) & 0xFF;
+    uint32_t bg = (cfg.border_color >> 16) & 0xFF;
+    uint32_t bb = (cfg.border_color >> 8) & 0xFF;
+    uint32_t ba = cfg.border_color & 0xFF;
+    uint32_t b_col = (ba << 24) | (br << 16) | (bg << 8) | bb;
     float b_thick = cfg.border_thickness;
 
     for (int y = 0; y < dst_h; y++) {
@@ -630,7 +652,6 @@ void camera_engine_composite_d3d11(void* d3d11_device, void* d3d11_context, void
         }
     }
 
-    ID3D11DeviceContext* pCtx = (ID3D11DeviceContext*)d3d11_context;
     D3D11_BOX box;
     box.left = (UINT)dst_x;
     box.top = (UINT)dst_y;
@@ -639,7 +660,21 @@ void camera_engine_composite_d3d11(void* d3d11_device, void* d3d11_context, void
     box.bottom = (UINT)(dst_y + dst_h);
     box.back = 1;
 
-    pCtx->UpdateSubresource((ID3D11Resource*)dest_texture, 0, &box, s_scaledBuffer, dst_w * 4, 0);
+    ID3D11Texture2D* pDestTex = (ID3D11Texture2D*)dest_texture;
+    ID3D11Device* pOwnerDev = NULL;
+    pDestTex->GetDevice(&pOwnerDev);
+    if (pOwnerDev) {
+        ID3D11DeviceContext* pOwnerCtx = NULL;
+        pOwnerDev->GetImmediateContext(&pOwnerCtx);
+        if (pOwnerCtx) {
+            pOwnerCtx->UpdateSubresource((ID3D11Resource*)pDestTex, 0, &box, s_scaledBuffer, dst_w * 4, 0);
+            pOwnerCtx->Release();
+        }
+        pOwnerDev->Release();
+    } else if (d3d11_context) {
+        ID3D11DeviceContext* pCtx = (ID3D11DeviceContext*)d3d11_context;
+        pCtx->UpdateSubresource((ID3D11Resource*)pDestTex, 0, &box, s_scaledBuffer, dst_w * 4, 0);
+    }
 
     LeaveCriticalSection(&s_frameCs);
     (void)d3d11_device;

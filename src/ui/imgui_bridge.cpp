@@ -1550,7 +1550,8 @@ static void render_camera_controls(UiState* state, int lang) {
 
             dl->AddImageRounded((ImTextureID)(intptr_t)cam_srv, ImVec2(off_x, off_y), ImVec2(off_x + dr_w, off_y + dr_h), uv0, uv1, tint, rad);
             if (state->camera_border_thickness > 0.0f) {
-                dl->AddRect(ImVec2(off_x, off_y), ImVec2(off_x + dr_w, off_y + dr_h), state->camera_border_color, rad, 0, state->camera_border_thickness);
+                ImU32 b_col = IM_COL32((state->camera_border_color >> 24) & 0xFF, (state->camera_border_color >> 16) & 0xFF, (state->camera_border_color >> 8) & 0xFF, state->camera_border_color & 0xFF);
+                dl->AddRect(ImVec2(off_x, off_y), ImVec2(off_x + dr_w, off_y + dr_h), b_col, rad, 0, state->camera_border_thickness);
             }
         } else {
             const char* off_text = tr(lang, "Camera is Offline or Initializing...", "Камера вимкнена або ініціалізується...", "摄像头离线或正在初始化...", "Kamera offline oder wird initialisiert...", "Caméra hors ligne ou en cours...", "Kamera offline lub trwa inicjalizacja...");
@@ -2489,7 +2490,8 @@ void imgui_window_render_ui(UiState* state) {
                             draw_list->AddImageRounded((ImTextureID)(intptr_t)cam_srv, p_min, p_max, uv0, uv1, tint_col, r_cr);
 
                             if (state->camera_border_thickness > 0.0f) {
-                                draw_list->AddRect(p_min, p_max, state->camera_border_color, r_cr, 0, state->camera_border_thickness);
+                                ImU32 b_col = IM_COL32((state->camera_border_color >> 24) & 0xFF, (state->camera_border_color >> 16) & 0xFF, (state->camera_border_color >> 8) & 0xFF, state->camera_border_color & 0xFF);
+                                draw_list->AddRect(p_min, p_max, b_col, r_cr, 0, state->camera_border_thickness);
                             }
                         }
                     }
