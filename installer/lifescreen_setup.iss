@@ -2,7 +2,7 @@
 ; Styled for LifeScreen by Baneronetwo (BANSAFAn)
 
 #define MyAppName "LifeScreen Recorder"
-#define MyAppVersion "0.1.1"
+#define MyAppVersion "0.1.2"
 #define MyAppPublisher "Baneronetwo (BANSAFAn)"
 #define MyAppURL "https://github.com/lifescreen-recorder/Code"
 #define MyAppExeName "lifescreen.exe"
