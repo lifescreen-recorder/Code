@@ -623,11 +623,16 @@ static int                      g_currentHotkeyPreset = -1;
 static ID3D11Texture2D*          g_pPreviewTexture = NULL;
 static ID3D11ShaderResourceView* g_pPreviewSRV = NULL;
 static ID3D11Texture2D*          g_pPreviewSharedOpenedTexture = NULL;
+static ID3D11Texture2D*          g_pPreviewBridgeSrcTex = NULL;
+static ID3D11Device*             g_pPreviewBridgeSrcDev = NULL;
+static int                       g_previewBridgeW = 0;
+static int                       g_previewBridgeH = 0;
 static HANDLE                    g_previewSharedHandle = NULL;
 static int                       g_previewWidth = 0;
 static int                       g_previewHeight = 0;
 static bool                      g_previewEnabled = false;
 static bool                      g_skipCurrentFrameRender = false;
+static bool                      g_isCurrentlyRecording = false;
 static bool                      g_previewPaused = false;
 static uint64_t                  g_previewFrameCount = 0;
 static CRITICAL_SECTION          g_previewCs;
@@ -638,6 +643,13 @@ static void reset_preview_shared_cache(void) {
         g_pPreviewSharedOpenedTexture->Release();
         g_pPreviewSharedOpenedTexture = NULL;
     }
+    if (g_pPreviewBridgeSrcTex) {
+        g_pPreviewBridgeSrcTex->Release();
+        g_pPreviewBridgeSrcTex = NULL;
+    }
+    g_pPreviewBridgeSrcDev = NULL;
+    g_previewBridgeW = 0;
+    g_previewBridgeH = 0;
     g_previewSharedHandle = NULL;
 }
 
@@ -708,28 +720,74 @@ void imgui_update_preview_d3d11(void* d3d11_texture, int width, int height) {
             g_pd3dDeviceContext->CopyResource((ID3D11Resource*)g_pPreviewTexture, (ID3D11Resource*)srcTex);
             if (srcDev) srcDev->Release();
         } else {
-            if (srcDev) srcDev->Release();
-            IDXGIResource* dxgiRes = NULL;
-            if (SUCCEEDED(srcTex->QueryInterface(__uuidof(IDXGIResource), (void**)&dxgiRes)) && dxgiRes) {
-                HANDLE sharedHandle = NULL;
-                if (SUCCEEDED(dxgiRes->GetSharedHandle(&sharedHandle)) && sharedHandle) {
-                    if (g_previewSharedHandle != sharedHandle || !g_pPreviewSharedOpenedTexture) {
-                        reset_preview_shared_cache();
-                        if (FAILED(g_pd3dDevice->OpenSharedResource(sharedHandle, __uuidof(ID3D11Texture2D), (void**)&g_pPreviewSharedOpenedTexture)) || !g_pPreviewSharedOpenedTexture) {
-                            g_previewSharedHandle = NULL;
-                        } else {
-                            g_previewSharedHandle = sharedHandle;
+            D3D11_TEXTURE2D_DESC srcDesc = {};
+            srcTex->GetDesc(&srcDesc);
+
+            if ((srcDesc.MiscFlags & D3D11_RESOURCE_MISC_SHARED) != 0) {
+                if (srcDev) srcDev->Release();
+                IDXGIResource* dxgiRes = NULL;
+                if (SUCCEEDED(srcTex->QueryInterface(__uuidof(IDXGIResource), (void**)&dxgiRes)) && dxgiRes) {
+                    HANDLE sharedHandle = NULL;
+                    if (SUCCEEDED(dxgiRes->GetSharedHandle(&sharedHandle)) && sharedHandle) {
+                        if (g_previewSharedHandle != sharedHandle || !g_pPreviewSharedOpenedTexture) {
+                            reset_preview_shared_cache();
+                            if (FAILED(g_pd3dDevice->OpenSharedResource(sharedHandle, __uuidof(ID3D11Texture2D), (void**)&g_pPreviewSharedOpenedTexture)) || !g_pPreviewSharedOpenedTexture) {
+                                g_previewSharedHandle = NULL;
+                            } else {
+                                g_previewSharedHandle = sharedHandle;
+                            }
                         }
+                        if (g_pPreviewSharedOpenedTexture) {
+                            g_pd3dDeviceContext->CopyResource((ID3D11Resource*)g_pPreviewTexture, (ID3D11Resource*)g_pPreviewSharedOpenedTexture);
+                        }
+                    } else {
+                        reset_preview_shared_cache();
                     }
-                    if (g_pPreviewSharedOpenedTexture) {
-                        g_pd3dDeviceContext->CopyResource((ID3D11Resource*)g_pPreviewTexture, (ID3D11Resource*)g_pPreviewSharedOpenedTexture);
-                    }
+                    dxgiRes->Release();
                 } else {
                     reset_preview_shared_cache();
                 }
-                dxgiRes->Release();
-            } else {
-                reset_preview_shared_cache();
+            } else if (srcDev) {
+                if (!g_pPreviewBridgeSrcTex || g_pPreviewBridgeSrcDev != srcDev || g_previewBridgeW != req_w || g_previewBridgeH != req_h || !g_pPreviewSharedOpenedTexture) {
+                    reset_preview_shared_cache();
+                    D3D11_TEXTURE2D_DESC bdesc = {};
+                    bdesc.Width = (UINT)req_w;
+                    bdesc.Height = (UINT)req_h;
+                    bdesc.MipLevels = 1;
+                    bdesc.ArraySize = 1;
+                    bdesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                    bdesc.SampleDesc.Count = 1;
+                    bdesc.Usage = D3D11_USAGE_DEFAULT;
+                    bdesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+                    bdesc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+
+                    if (SUCCEEDED(srcDev->CreateTexture2D(&bdesc, NULL, &g_pPreviewBridgeSrcTex)) && g_pPreviewBridgeSrcTex) {
+                        IDXGIResource* dxgiRes = NULL;
+                        if (SUCCEEDED(g_pPreviewBridgeSrcTex->QueryInterface(__uuidof(IDXGIResource), (void**)&dxgiRes)) && dxgiRes) {
+                            HANDLE sharedHandle = NULL;
+                            if (SUCCEEDED(dxgiRes->GetSharedHandle(&sharedHandle)) && sharedHandle) {
+                                if (SUCCEEDED(g_pd3dDevice->OpenSharedResource(sharedHandle, __uuidof(ID3D11Texture2D), (void**)&g_pPreviewSharedOpenedTexture)) && g_pPreviewSharedOpenedTexture) {
+                                    g_previewSharedHandle = sharedHandle;
+                                    g_pPreviewBridgeSrcDev = srcDev;
+                                    g_previewBridgeW = req_w;
+                                    g_previewBridgeH = req_h;
+                                }
+                            }
+                            dxgiRes->Release();
+                        }
+                    }
+                }
+                if (g_pPreviewBridgeSrcTex && g_pPreviewSharedOpenedTexture) {
+                    ID3D11DeviceContext* srcCtx = NULL;
+                    srcDev->GetImmediateContext(&srcCtx);
+                    if (srcCtx) {
+                        srcCtx->CopyResource((ID3D11Resource*)g_pPreviewBridgeSrcTex, (ID3D11Resource*)srcTex);
+                        srcCtx->Flush();
+                        srcCtx->Release();
+                        g_pd3dDeviceContext->CopyResource((ID3D11Resource*)g_pPreviewTexture, (ID3D11Resource*)g_pPreviewSharedOpenedTexture);
+                    }
+                }
+                srcDev->Release();
             }
         }
         g_previewFrameCount++;
@@ -1063,7 +1121,7 @@ bool imgui_window_create(int width, int height, const char* title) {
     sd.SampleDesc.Count = 1;
     sd.SampleDesc.Quality = 0;
     sd.Windowed = TRUE;
-    sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    sd.SwapEffect = (DXGI_SWAP_EFFECT)4;
 
     UINT createDeviceFlags = 0;
     D3D_FEATURE_LEVEL featureLevel;
@@ -1082,6 +1140,23 @@ bool imgui_window_create(int width, int height, const char* title) {
         &featureLevel,
         &g_pd3dDeviceContext
     );
+
+    if (hr != S_OK) {
+        sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+        hr = D3D11CreateDeviceAndSwapChain(
+            NULL,
+            D3D_DRIVER_TYPE_HARDWARE,
+            NULL,
+            createDeviceFlags,
+            featureLevelArray, 2,
+            D3D11_SDK_VERSION,
+            &sd,
+            &g_pSwapChain,
+            &g_pd3dDevice,
+            &featureLevel,
+            &g_pd3dDeviceContext
+        );
+    }
 
     if (hr != S_OK) return false;
 
@@ -1166,7 +1241,8 @@ void imgui_window_begin_frame(void) {
     if (g_hWnd && GetForegroundWindow() != g_hWnd) {
         static DWORD s_lastBgFrameTick = 0;
         DWORD now = GetTickCount();
-        if (now - s_lastBgFrameTick < 150) {
+        DWORD bg_interval = g_isCurrentlyRecording ? 1000 : 200;
+        if (now - s_lastBgFrameTick < bg_interval) {
             g_skipCurrentFrameRender = true;
             return;
         }
@@ -1574,6 +1650,7 @@ static void render_camera_controls(UiState* state, int lang) {
 void imgui_window_render_ui(UiState* state) {
     int lang = state->language;
     bool is_recording = (state->state == 2 || state->state == 3);
+    g_isCurrentlyRecording = is_recording;
 
     camera_engine_init();
     state->camera_device_names = camera_engine_get_device_names();
@@ -3573,7 +3650,7 @@ tr(lang, "MOV (*.mov - Video Editing / QuickTime)", "MOV (*.mov - Монтаж �
 
 void imgui_window_present(void) {
     if (g_skipCurrentFrameRender || (g_hWnd && IsIconic(g_hWnd))) {
-        Sleep(30);
+        Sleep(25);
         return;
     }
 
@@ -3582,15 +3659,12 @@ void imgui_window_present(void) {
     g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, NULL);
     g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-    HRESULT hr = g_pSwapChain->Present(1, 0); // V-Sync enabled
+    HRESULT hr = g_pSwapChain->Present(1, 0);
 
     if (hr == DXGI_STATUS_OCCLUDED) {
-        // Window is occluded (covered by game or other app): Present does not wait for V-Sync.
-        // Sleep to avoid high-frequency unthrottled loop!
         Sleep(30);
     } else if (g_hWnd && GetForegroundWindow() != g_hWnd) {
-        // Window in background while playing game: throttle to 30 FPS
-        Sleep(16);
+        Sleep(25);
     }
 }
 

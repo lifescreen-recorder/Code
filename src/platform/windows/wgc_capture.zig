@@ -21,7 +21,7 @@ extern fn wgc_capture_destroy(cap: ?*anyopaque) callconv(.c) void;
 pub const WgcCapture = struct {
     handle: *anyopaque,
     d3d: d3d11.D3D11Context,
-    dest_textures: [4]*d3d11.ID3D11Texture2D,
+    dest_textures: [6]*d3d11.ID3D11Texture2D,
     tex_index: usize = 0,
     width: u32,
     height: u32,
@@ -34,10 +34,10 @@ pub const WgcCapture = struct {
             .Format = d3d11.DXGI_FORMAT_B8G8R8A8_UNORM,
             .Usage = d3d11.D3D11_USAGE_DEFAULT,
             .BindFlags = d3d11.D3D11_BIND_RENDER_TARGET | d3d11.D3D11_BIND_SHADER_RESOURCE,
-            .MiscFlags = 0x2,
+            .MiscFlags = 0,
         };
 
-        for (0..4) |i| {
+        for (0..6) |i| {
             const new_tex = try self.d3d.device.createTexture2D(&tex_desc);
             _ = self.dest_textures[i].release();
             self.dest_textures[i] = new_tex;
@@ -77,15 +77,15 @@ pub const WgcCapture = struct {
             .Format = d3d11.DXGI_FORMAT_B8G8R8A8_UNORM,
             .Usage = d3d11.D3D11_USAGE_DEFAULT,
             .BindFlags = d3d11.D3D11_BIND_RENDER_TARGET | d3d11.D3D11_BIND_SHADER_RESOURCE,
-            .MiscFlags = 0x2, // D3D11_RESOURCE_MISC_SHARED
+            .MiscFlags = 0,
         };
 
-        var dest_texs: [4]*d3d11.ID3D11Texture2D = undefined;
+        var dest_texs: [6]*d3d11.ID3D11Texture2D = undefined;
         var created_cnt: usize = 0;
         errdefer for (0..created_cnt) |i| {
             _ = dest_texs[i].release();
         };
-        for (0..4) |i| {
+        for (0..6) |i| {
             dest_texs[i] = try d3d_ctx.device.createTexture2D(&tex_desc);
             created_cnt += 1;
         }
@@ -126,15 +126,15 @@ pub const WgcCapture = struct {
             .Format = d3d11.DXGI_FORMAT_B8G8R8A8_UNORM,
             .Usage = d3d11.D3D11_USAGE_DEFAULT,
             .BindFlags = d3d11.D3D11_BIND_RENDER_TARGET | d3d11.D3D11_BIND_SHADER_RESOURCE,
-            .MiscFlags = 0x2,
+            .MiscFlags = 0,
         };
 
-        var dest_texs: [4]*d3d11.ID3D11Texture2D = undefined;
+        var dest_texs: [6]*d3d11.ID3D11Texture2D = undefined;
         var created_cnt: usize = 0;
         errdefer for (0..created_cnt) |i| {
             _ = dest_texs[i].release();
         };
-        for (0..4) |i| {
+        for (0..6) |i| {
             dest_texs[i] = try d3d_ctx.device.createTexture2D(&tex_desc);
             created_cnt += 1;
         }
@@ -160,7 +160,7 @@ pub const WgcCapture = struct {
         if (!ok) return null;
 
         const out_tex = self.dest_textures[self.tex_index];
-        self.tex_index = (self.tex_index + 1) % 4;
+        self.tex_index = (self.tex_index + 1) % 6;
         self.width = w;
         self.height = h;
         self.frame_count += 1;

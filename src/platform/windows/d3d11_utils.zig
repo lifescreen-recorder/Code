@@ -175,6 +175,34 @@ pub const ID3D11Device = extern struct {
     }
 };
 
+pub const IID_IDXGIDevice = std.os.windows.GUID{
+    .Data1 = 0x54ec77fa,
+    .Data2 = 0x1377,
+    .Data3 = 0x44e6,
+    .Data4 = .{ 0x8c, 0x32, 0x88, 0xfd, 0x5f, 0x44, 0xc8, 0x4c },
+};
+
+pub const IDXGIDevice = extern struct {
+    vtable: *const VTable,
+
+    pub const VTable = extern struct {
+        base: IUnknown.VTable,
+        SetPrivateData: ?*const anyopaque,
+        SetPrivateDataInterface: ?*const anyopaque,
+        GetPrivateData: ?*const anyopaque,
+        GetParent: ?*const anyopaque,
+        GetAdapter: ?*const anyopaque,
+        CreateSurface: ?*const anyopaque,
+        QueryResourceResidency: ?*const anyopaque,
+        SetGPUThreadPriority: *const fn (self: *IDXGIDevice, priority: i32) callconv(.winapi) HRESULT,
+        GetGPUThreadPriority: ?*const anyopaque,
+    };
+
+    pub inline fn release(self: *IDXGIDevice) u32 {
+        return self.vtable.base.Release(@ptrCast(self));
+    }
+};
+
 pub const IID_ID3D11Multithread = std.os.windows.GUID{
     .Data1 = 0x9b7e4e00,
     .Data2 = 0x342c,
@@ -253,12 +281,18 @@ pub const D3D11Context = struct {
             return error.D3D11DeviceCreationFailed;
         }
 
-        // Enable D3D11 Multithread protection so capture and encoder threads can safely share context
         var multithread_ptr: ?*anyopaque = null;
         if (context.?.vtable.base.QueryInterface(@ptrCast(context.?), &IID_ID3D11Multithread, &multithread_ptr) == S_OK and multithread_ptr != null) {
             const mt: *ID3D11Multithread = @ptrCast(@alignCast(multithread_ptr.?));
             _ = mt.vtable.SetMultithreadProtected(mt, 1);
             _ = mt.release();
+        }
+
+        var dxgi_dev_ptr: ?*anyopaque = null;
+        if (device.?.vtable.base.QueryInterface(@ptrCast(device.?), &IID_IDXGIDevice, &dxgi_dev_ptr) == S_OK and dxgi_dev_ptr != null) {
+            const dxgi_dev: *IDXGIDevice = @ptrCast(@alignCast(dxgi_dev_ptr.?));
+            _ = dxgi_dev.vtable.SetGPUThreadPriority(dxgi_dev, 5);
+            _ = dxgi_dev.release();
         }
 
         return .{

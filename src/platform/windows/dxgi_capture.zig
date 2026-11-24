@@ -364,7 +364,7 @@ fn getAdapterName(adapter: *IDXGIAdapter1, buf: *[128]u8) []const u8 {
 pub const DxgiCapture = struct {
     d3d: d3d11.D3D11Context,
     duplication: *IDXGIOutputDuplication,
-    dest_textures: [4]*d3d11.ID3D11Texture2D,
+    dest_textures: [6]*d3d11.ID3D11Texture2D,
     tex_index: usize = 0,
     desktop_handle: ?*anyopaque = null,
     width: u32,
@@ -472,22 +472,21 @@ pub const DxgiCapture = struct {
 
                 std.log.scoped(.dxgi).info("  -> DuplicateOutput SUCCEEDED on adapter '{s}'!", .{adapter_name});
 
-                // Create persistent destination texture for Zero-Copy pass (Standard fast GPU texture)
                 const tex_desc = d3d11.D3D11_TEXTURE2D_DESC{
                     .Width = width,
                     .Height = height,
                     .Format = d3d11.DXGI_FORMAT_B8G8R8A8_UNORM,
                     .Usage = d3d11.D3D11_USAGE_DEFAULT,
                     .BindFlags = d3d11.D3D11_BIND_RENDER_TARGET | d3d11.D3D11_BIND_SHADER_RESOURCE,
-                    .MiscFlags = 0x2, // D3D11_RESOURCE_MISC_SHARED
+                    .MiscFlags = 0,
                 };
 
-                var dest_texs: [4]*d3d11.ID3D11Texture2D = undefined;
+                var dest_texs: [6]*d3d11.ID3D11Texture2D = undefined;
                 var created_cnt: usize = 0;
                 errdefer for (0..created_cnt) |i| {
                     _ = dest_texs[i].release();
                 };
-                for (0..4) |i| {
+                for (0..6) |i| {
                     dest_texs[i] = d3d_ctx.device.createTexture2D(&tex_desc) catch |err| {
                         for (0..created_cnt) |j| {
                             _ = dest_texs[j].release();
@@ -580,7 +579,7 @@ pub const DxgiCapture = struct {
 
         const out_tex = self.dest_textures[self.tex_index];
         self.d3d.context.copyResource(@ptrCast(out_tex), @ptrCast(acquired_tex));
-        self.tex_index = (self.tex_index + 1) % 4;
+        self.tex_index = (self.tex_index + 1) % 6;
 
         self.frame_count += 1;
         return types.VideoFrame{

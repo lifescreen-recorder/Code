@@ -17,7 +17,8 @@
 #include <libswresample/swresample.h>
 #include <libavutil/audio_fifo.h>
 
-#define STAGING_BUFFERS 2
+#define STAGING_BUFFERS 3
+#define MAX_VP_INPUT_VIEWS 8
 
 
 struct VideoEncoderContext {
@@ -46,13 +47,16 @@ struct VideoEncoderContext {
     ID3D11VideoProcessor *video_processor;
     ID3D11Texture2D *gpu_nv12_texture;
     ID3D11VideoProcessorOutputView *video_output_view;
-    ID3D11VideoProcessorInputView *video_input_view;
-    ID3D11Resource *last_input_resource;
+    ID3D11VideoProcessorInputView *video_input_views[MAX_VP_INPUT_VIEWS];
+    ID3D11Resource *input_resources[MAX_VP_INPUT_VIEWS];
+    int input_view_count;
     bool use_gpu_nv12_staging;
 
     ID3D11Texture2D *staging_textures[STAGING_BUFFERS];
     int64_t staging_pts[STAGING_BUFFERS];
-    int staging_index;
+    uint8_t staging_is_repeat[STAGING_BUFFERS];
+    int staging_read_idx;
+    int staging_write_idx;
     int staging_count;
     int64_t last_pts;
     bool capture_cursor;
@@ -450,7 +454,7 @@ VideoEncoderContext* ffmpeg_encoder_create(const VideoEncoderConfig *cfg, Packet
             av_opt_set(ctx->codec_ctx->priv_data, "x264-params", "no-cabac=1:ref=1:rc-lookahead=0:slices=1", 0);
         } else if (cfg->low_end_mode) {
             av_opt_set(ctx->codec_ctx->priv_data, "x264-params",
-                "ref=2:rc-lookahead=10:sync-lookahead=6:b-adapt=0:aq-mode=1:subme=2:me=hex:trellis=1", 0);
+                "ref=1:no-mbtree=1:rc-lookahead=0:sync-lookahead=0:b-adapt=0:aq-mode=1:subme=1:me=dia:trellis=0:weightp=0", 0);
         } else {
             av_opt_set(ctx->codec_ctx->priv_data, "x264-params", "ref=1:no-mbtree=1:rc-lookahead=0:sync-lookahead=0:b-adapt=0:aq-mode=0:subme=1:me=dia:trellis=0", 0);
         }
@@ -472,7 +476,7 @@ VideoEncoderContext* ffmpeg_encoder_create(const VideoEncoderConfig *cfg, Packet
             vdesc.InputHeight = ctx->src_height;
             vdesc.OutputWidth = ctx->width;
             vdesc.OutputHeight = ctx->height;
-            vdesc.Usage = cfg->low_end_mode ? D3D11_VIDEO_USAGE_OPTIMAL_SPEED : D3D11_VIDEO_USAGE_OPTIMAL_QUALITY;
+            vdesc.Usage = D3D11_VIDEO_USAGE_OPTIMAL_SPEED;
 
             HRESULT hr_enum = ctx->video_device->lpVtbl->CreateVideoProcessorEnumerator(
                 ctx->video_device, &vdesc, &ctx->video_enumerator);
@@ -487,7 +491,8 @@ VideoEncoderContext* ffmpeg_encoder_create(const VideoEncoderConfig *cfg, Packet
                         ctx->video_device, ctx->video_enumerator, 0, &ctx->video_processor);
 
                     if (SUCCEEDED(hr_vp) && ctx->video_processor) {
-                        // Create GPU NV12 destination texture in VRAM
+                        ctx->video_context->lpVtbl->VideoProcessorSetStreamAutoProcessingMode(
+                            ctx->video_context, ctx->video_processor, 0, FALSE);
                         D3D11_TEXTURE2D_DESC nv12_desc = {0};
                         nv12_desc.Width = ctx->width;
                         nv12_desc.Height = ctx->height;
@@ -522,7 +527,8 @@ VideoEncoderContext* ffmpeg_encoder_create(const VideoEncoderConfig *cfg, Packet
         }
 
         ctx->d3d11_device = dev;
-        ctx->staging_index = 0;
+        ctx->staging_read_idx = 0;
+        ctx->staging_write_idx = 0;
         ctx->staging_count = 0;
     }
 
@@ -564,7 +570,7 @@ VideoEncoderContext* ffmpeg_encoder_create(const VideoEncoderConfig *cfg, Packet
                 av_opt_set(ctx->codec_ctx->priv_data, "fullrange", (cfg->color_range == 1) ? "on" : "off", 0);
                 if (cfg->low_end_mode) {
                     av_opt_set(ctx->codec_ctx->priv_data, "x264-params",
-                        "ref=2:rc-lookahead=10:sync-lookahead=6:b-adapt=0:aq-mode=1:subme=2:me=hex:trellis=1", 0);
+                        "ref=1:no-mbtree=1:rc-lookahead=0:sync-lookahead=0:b-adapt=0:aq-mode=1:subme=1:me=dia:trellis=0:weightp=0", 0);
                 } else {
                     av_opt_set(ctx->codec_ctx->priv_data, "x264-params", "no-mbtree=1:rc-lookahead=0:sync-lookahead=0:b-adapt=0", 0);
                 }
@@ -1344,16 +1350,39 @@ static int encode_sw_frame(VideoEncoderContext *ctx, int64_t pts_nanos) {
 }
 
 static int drain_staged_frame(VideoEncoderContext *ctx, int read_idx) {
-    if (!ctx || !ctx->staging_textures[read_idx] || !ctx->d3d11_context) return -1;
+    if (!ctx) return -1;
+    if (ctx->staging_is_repeat[read_idx]) {
+        if (ctx->sw_frame && ctx->sw_frame->width > 0 && ctx->sw_frame->data[0]) {
+            return encode_sw_frame(ctx, ctx->staging_pts[read_idx]);
+        }
+        return 0;
+    }
+    if (!ctx->staging_textures[read_idx] || !ctx->d3d11_context) return -1;
     D3D11_MAPPED_SUBRESOURCE mapped;
-    HRESULT hr = ctx->d3d11_context->lpVtbl->Map(
-        ctx->d3d11_context,
-        (ID3D11Resource*)ctx->staging_textures[read_idx],
-        0,
-        D3D11_MAP_READ,
-        0,
-        &mapped
-    );
+    HRESULT hr = E_FAIL;
+    for (int tries = 0; tries < 6; tries++) {
+        hr = ctx->d3d11_context->lpVtbl->Map(
+            ctx->d3d11_context,
+            (ID3D11Resource*)ctx->staging_textures[read_idx],
+            0,
+            D3D11_MAP_READ,
+            0x100000,
+            &mapped
+        );
+        if (SUCCEEDED(hr)) break;
+        if (hr != (HRESULT)0x887A000A) break;
+        Sleep(1);
+    }
+    if (FAILED(hr)) {
+        hr = ctx->d3d11_context->lpVtbl->Map(
+            ctx->d3d11_context,
+            (ID3D11Resource*)ctx->staging_textures[read_idx],
+            0,
+            D3D11_MAP_READ,
+            0,
+            &mapped
+        );
+    }
     if (FAILED(hr)) return -1;
 
     if (ctx->use_gpu_nv12_staging) {
@@ -1393,36 +1422,47 @@ static int drain_staged_frame(VideoEncoderContext *ctx, int read_idx) {
 int ffmpeg_encoder_send_d3d11_texture(VideoEncoderContext *ctx, void *d3d11_texture, int64_t pts_nanos) {
     if (!ctx || !ctx->codec_ctx || !d3d11_texture) return -1;
 
-    // Step 1: Hardware GPU Color Conversion via ID3D11VideoProcessor (0% CPU)
     if (ctx->video_processor && ctx->video_output_view && ctx->gpu_nv12_texture && ctx->video_context && ctx->video_device) {
-        // Lazily create or update VideoProcessorInputView if input texture pointer changed
-        if (ctx->last_input_resource != (ID3D11Resource*)d3d11_texture || !ctx->video_input_view) {
-            if (ctx->video_input_view) {
-                ctx->video_input_view->lpVtbl->Release(ctx->video_input_view);
-                ctx->video_input_view = NULL;
+        ID3D11Resource *in_res = (ID3D11Resource*)d3d11_texture;
+        ID3D11VideoProcessorInputView *active_view = NULL;
+        for (int i = 0; i < ctx->input_view_count; i++) {
+            if (ctx->input_resources[i] == in_res) {
+                active_view = ctx->video_input_views[i];
+                break;
             }
+        }
+        if (!active_view) {
             D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC iv_desc = {0};
             iv_desc.FourCC = 0;
             iv_desc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
             iv_desc.Texture2D.MipSlice = 0;
             iv_desc.Texture2D.ArraySlice = 0;
             HRESULT hr = ctx->video_device->lpVtbl->CreateVideoProcessorInputView(
-                ctx->video_device, (ID3D11Resource*)d3d11_texture,
-                ctx->video_enumerator, &iv_desc, &ctx->video_input_view);
-            if (FAILED(hr)) {
-                ctx->video_input_view = NULL;
-                ctx->last_input_resource = NULL;
+                ctx->video_device, in_res,
+                ctx->video_enumerator, &iv_desc, &active_view);
+            if (SUCCEEDED(hr) && active_view) {
+                if (ctx->input_view_count < MAX_VP_INPUT_VIEWS) {
+                    ctx->input_resources[ctx->input_view_count] = in_res;
+                    ctx->video_input_views[ctx->input_view_count] = active_view;
+                    ctx->input_view_count++;
+                } else {
+                    if (ctx->video_input_views[0]) {
+                        ctx->video_input_views[0]->lpVtbl->Release(ctx->video_input_views[0]);
+                    }
+                    ctx->input_resources[0] = in_res;
+                    ctx->video_input_views[0] = active_view;
+                }
             } else {
-                ctx->last_input_resource = (ID3D11Resource*)d3d11_texture;
+                active_view = NULL;
             }
         }
 
-        if (ctx->video_input_view) {
+        if (active_view) {
             D3D11_VIDEO_PROCESSOR_STREAM stream = {0};
             stream.Enable = TRUE;
             stream.OutputIndex = 0;
             stream.InputFrameOrField = 0;
-            stream.pInputSurface = ctx->video_input_view;
+            stream.pInputSurface = active_view;
 
             ctx->video_context->lpVtbl->VideoProcessorBlt(
                 ctx->video_context, ctx->video_processor, ctx->video_output_view, 0, 1, &stream);
@@ -1473,9 +1513,10 @@ int ffmpeg_encoder_send_d3d11_texture(VideoEncoderContext *ctx, void *d3d11_text
         }
     }
 
-    if (ctx->staging_textures[0] && ctx->staging_textures[1] && ctx->d3d11_context) {
-        int write_idx = ctx->staging_index;
+    if (ctx->staging_textures[0] && ctx->staging_textures[1] && ctx->staging_textures[2] && ctx->d3d11_context) {
+        int write_idx = ctx->staging_write_idx;
         ctx->staging_pts[write_idx] = pts_nanos;
+        ctx->staging_is_repeat[write_idx] = 0;
 
         ID3D11Resource *src_to_stage = (ctx->use_gpu_nv12_staging && ctx->gpu_nv12_texture)
             ? (ID3D11Resource*)ctx->gpu_nv12_texture
@@ -1487,14 +1528,17 @@ int ffmpeg_encoder_send_d3d11_texture(VideoEncoderContext *ctx, void *d3d11_text
             src_to_stage
         );
 
-        ctx->staging_index = (ctx->staging_index + 1) % STAGING_BUFFERS;
+        ctx->staging_write_idx = (write_idx + 1) % STAGING_BUFFERS;
+        ctx->staging_count++;
 
-        if (ctx->staging_count < 1) {
-            ctx->staging_count = 1;
+        if (ctx->staging_count < STAGING_BUFFERS) {
             return 0;
         }
 
-        return drain_staged_frame(ctx, ctx->staging_index);
+        int read_idx = ctx->staging_read_idx;
+        ctx->staging_read_idx = (read_idx + 1) % STAGING_BUFFERS;
+        ctx->staging_count--;
+        return drain_staged_frame(ctx, read_idx);
     }
 
     return -1;
@@ -1503,12 +1547,6 @@ int ffmpeg_encoder_send_d3d11_texture(VideoEncoderContext *ctx, void *d3d11_text
 int ffmpeg_encoder_repeat_last_frame(VideoEncoderContext *ctx, int64_t pts_nanos) {
     if (!ctx || !ctx->codec_ctx) return -1;
 
-    if (ctx->staging_count > 0 && ctx->staging_textures[0] && ctx->d3d11_context) {
-        drain_staged_frame(ctx, (ctx->staging_index + 1) % STAGING_BUFFERS);
-        ctx->staging_count = 0;
-    }
-
-    // Zero-cost hardware repeat: re-send existing GPU NV12 texture in VRAM
     if (ctx->is_hardware && ctx->hw_frames_ref && ctx->gpu_nv12_texture && ctx->hw_frame->width > 0) {
         ctx->hw_frame->pts = get_next_monotonic_pts(ctx, pts_nanos);
         if (avcodec_send_frame(ctx->codec_ctx, ctx->hw_frame) == 0) {
@@ -1517,7 +1555,23 @@ int ffmpeg_encoder_repeat_last_frame(VideoEncoderContext *ctx, int64_t pts_nanos
         }
     }
 
-    // Zero-cost software/staging repeat: re-send already converted sw_frame in RAM (0 GPU copies, 0 DMA readbacks, 0 memcpy)
+    if (ctx->staging_textures[0] && ctx->staging_textures[1] && ctx->staging_textures[2] && ctx->d3d11_context) {
+        int write_idx = ctx->staging_write_idx;
+        ctx->staging_pts[write_idx] = pts_nanos;
+        ctx->staging_is_repeat[write_idx] = 1;
+        ctx->staging_write_idx = (write_idx + 1) % STAGING_BUFFERS;
+        ctx->staging_count++;
+
+        if (ctx->staging_count < STAGING_BUFFERS) {
+            return 0;
+        }
+
+        int read_idx = ctx->staging_read_idx;
+        ctx->staging_read_idx = (read_idx + 1) % STAGING_BUFFERS;
+        ctx->staging_count--;
+        return drain_staged_frame(ctx, read_idx);
+    }
+
     if (ctx->sw_frame && ctx->sw_frame->width > 0 && ctx->sw_frame->data[0]) {
         return encode_sw_frame(ctx, pts_nanos);
     }
@@ -1533,9 +1587,11 @@ int ffmpeg_encoder_send_cpu_frame(VideoEncoderContext *ctx, const uint8_t *bgra_
 
 int ffmpeg_encoder_flush(VideoEncoderContext *ctx) {
     if (!ctx || !ctx->codec_ctx) return -1;
-    if (ctx->staging_count > 0 && ctx->staging_textures[0] && ctx->d3d11_context) {
-        drain_staged_frame(ctx, (ctx->staging_index + 1) % STAGING_BUFFERS);
-        ctx->staging_count = 0;
+    while (ctx->staging_count > 0) {
+        int read_idx = ctx->staging_read_idx;
+        ctx->staging_read_idx = (read_idx + 1) % STAGING_BUFFERS;
+        ctx->staging_count--;
+        drain_staged_frame(ctx, read_idx);
     }
     avcodec_send_frame(ctx->codec_ctx, NULL);
     drain_encoder_packets(ctx);
@@ -1544,10 +1600,14 @@ int ffmpeg_encoder_flush(VideoEncoderContext *ctx) {
 
 void ffmpeg_encoder_destroy(VideoEncoderContext *ctx) {
     if (!ctx) return;
-    if (ctx->video_input_view) {
-        ctx->video_input_view->lpVtbl->Release(ctx->video_input_view);
-        ctx->video_input_view = NULL;
+    for (int i = 0; i < ctx->input_view_count; i++) {
+        if (ctx->video_input_views[i]) {
+            ctx->video_input_views[i]->lpVtbl->Release(ctx->video_input_views[i]);
+            ctx->video_input_views[i] = NULL;
+        }
+        ctx->input_resources[i] = NULL;
     }
+    ctx->input_view_count = 0;
     if (ctx->video_output_view) {
         ctx->video_output_view->lpVtbl->Release(ctx->video_output_view);
         ctx->video_output_view = NULL;

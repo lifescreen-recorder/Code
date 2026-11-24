@@ -23,9 +23,49 @@ const THREAD_PRIORITY_LOWEST = -2;
 
 extern "kernel32" fn SetThreadPriority(hThread: ?*anyopaque, nPriority: i32) callconv(.winapi) i32;
 extern "kernel32" fn GetCurrentThread() callconv(.winapi) ?*anyopaque;
+extern "kernel32" fn CreateEventW(lpEventAttributes: ?*anyopaque, bManualReset: i32, bInitialState: i32, lpName: ?[*:0]const u16) callconv(.winapi) ?*anyopaque;
+extern "kernel32" fn SetEvent(hEvent: *anyopaque) callconv(.winapi) i32;
+extern "kernel32" fn WaitForSingleObject(hHandle: *anyopaque, dwMilliseconds: u32) callconv(.winapi) u32;
+extern "kernel32" fn CloseHandle(hObject: *anyopaque) callconv(.winapi) i32;
+extern "kernel32" fn LoadLibraryA(lpLibFileName: [*:0]const u8) callconv(.winapi) ?*anyopaque;
+extern "kernel32" fn GetProcAddress(hModule: *anyopaque, lpProcName: [*:0]const u8) callconv(.winapi) ?*const anyopaque;
 extern "user32" fn OpenInputDesktop(dwFlags: u32, fInherit: i32, dwDesiredAccess: u32) callconv(.winapi) ?*anyopaque;
 extern "user32" fn SetThreadDesktop(hDesktop: ?*anyopaque) callconv(.winapi) i32;
 extern "user32" fn CloseDesktop(hDesktop: ?*anyopaque) callconv(.winapi) i32;
+
+const AvSetMmThreadCharacteristicsFn = *const fn (TaskName: [*:0]const u8, TaskIndex: *u32) callconv(.winapi) ?*anyopaque;
+const AvRevertMmThreadCharacteristicsFn = *const fn (AvrtHandle: *anyopaque) callconv(.winapi) i32;
+
+var g_avrt_loaded: std.atomic.Value(bool) = .init(false);
+var g_av_set_mm: ?AvSetMmThreadCharacteristicsFn = null;
+var g_av_revert_mm: ?AvRevertMmThreadCharacteristicsFn = null;
+
+fn enterMmcss(task_name: [*:0]const u8) ?*anyopaque {
+    if (!g_avrt_loaded.load(.acquire)) {
+        if (LoadLibraryA("avrt.dll")) |mod| {
+            if (GetProcAddress(mod, "AvSetMmThreadCharacteristicsA")) |p1| {
+                g_av_set_mm = @ptrCast(p1);
+            }
+            if (GetProcAddress(mod, "AvRevertMmThreadCharacteristics")) |p2| {
+                g_av_revert_mm = @ptrCast(p2);
+            }
+        }
+        g_avrt_loaded.store(true, .release);
+    }
+    if (g_av_set_mm) |set_fn| {
+        var idx: u32 = 0;
+        return set_fn(task_name, &idx);
+    }
+    return null;
+}
+
+fn leaveMmcss(handle: ?*anyopaque) void {
+    if (handle) |h| {
+        if (g_av_revert_mm) |rev_fn| {
+            _ = rev_fn(h);
+        }
+    }
+}
 
 pub const Pipeline = struct {
     pub const FrameRing = ring_buffer.SpscRingBuffer(types.VideoFrame, 16);
@@ -48,8 +88,8 @@ pub const Pipeline = struct {
     encoder_thread: ?std.Thread = null,
     audio_thread: ?std.Thread = null,
 
-    // Buffers
     frame_ring: FrameRing = .init(),
+    frame_ready_event: ?*anyopaque = null,
 
     // Pipeline engine objects
     cap: ?capture_backend.CaptureBackend = null,
@@ -150,6 +190,7 @@ pub const Pipeline = struct {
         self.enc = video_enc;
         self.mux = mkv_mux;
         self.wav_out = wav_out_inst;
+        self.frame_ready_event = CreateEventW(null, 0, 0, null);
 
         clock.enableHighResolutionTimer();
         self.audio_ready.store(false, .release);
@@ -183,10 +224,16 @@ pub const Pipeline = struct {
         if (self.audio_thread) |t| t.join();
         self.audio_thread = null;
 
-        // Waterfall Phase 2: Stop encoder & wait for all remaining frames + flush
         self.encoder_active.store(false, .release);
+        if (self.frame_ready_event) |ev| {
+            _ = SetEvent(ev);
+        }
         if (self.encoder_thread) |t| t.join();
         self.encoder_thread = null;
+        if (self.frame_ready_event) |ev| {
+            _ = CloseHandle(ev);
+            self.frame_ready_event = null;
+        }
 
         self.is_running.store(false, .release);
         clock.disableHighResolutionTimer();
@@ -220,6 +267,8 @@ pub const Pipeline = struct {
     }
 
     fn captureWorker(self: *Pipeline) void {
+        const mmcss = enterMmcss("Games");
+        defer leaveMmcss(mmcss);
         _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
         const input_desk = OpenInputDesktop(0, 0, 0x01FF);
         if (input_desk) |desk| {
@@ -259,7 +308,9 @@ pub const Pipeline = struct {
             f0.is_repeat = false;
             last_valid_frame = f0;
             _ = self.stats.captured_frames.fetchAdd(1, .monotonic);
-            _ = self.frame_ring.tryPush(f0);
+            if (self.frame_ring.tryPush(f0)) {
+                if (self.frame_ready_event) |ev| _ = SetEvent(ev);
+            }
             frame_idx = 1;
         }
 
@@ -295,13 +346,15 @@ pub const Pipeline = struct {
                     app_window.imgui_update_preview_d3d11(frame.gpu_texture_ptr, @intCast(frame.width), @intCast(frame.height));
                 }
 
-                while (self.frame_ring.available() >= 8) {
+                while (self.frame_ring.available() >= 5) {
                     _ = self.frame_ring.tryPop();
                     _ = self.stats.dropped_frames.fetchAdd(1, .monotonic);
                 }
 
                 if (!self.frame_ring.tryPush(frame)) {
                     _ = self.stats.dropped_frames.fetchAdd(1, .monotonic);
+                } else if (self.frame_ready_event) |ev| {
+                    _ = SetEvent(ev);
                 }
                 frame_idx += 1;
             } else if (last_valid_frame) |prev| {
@@ -315,6 +368,8 @@ pub const Pipeline = struct {
                     _ = self.stats.captured_frames.fetchAdd(1, .monotonic);
                     if (!self.frame_ring.tryPush(repeat_frame)) {
                         _ = self.stats.dropped_frames.fetchAdd(1, .monotonic);
+                    } else if (self.frame_ready_event) |ev| {
+                        _ = SetEvent(ev);
                     }
                     frame_idx += 1;
                 }
@@ -332,11 +387,14 @@ pub const Pipeline = struct {
     }
 
     fn encoderWorker(self: *Pipeline) void {
+        const mmcss = enterMmcss("Games");
+        defer leaveMmcss(mmcss);
         _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 
         while (self.encoder_active.load(.acquire) or self.frame_ring.available() > 0) {
-
-            if (self.frame_ring.tryPop()) |frame| {
+            var processed_any = false;
+            while (self.frame_ring.tryPop()) |frame| {
+                processed_any = true;
                 if (frame.is_repeat) {
                     if (self.enc) |*e| {
                         e.repeatLastFrame(frame.pts_nanos) catch {};
@@ -348,8 +406,13 @@ pub const Pipeline = struct {
                         };
                     }
                 }
-            } else {
-                clock.sleepMs(1);
+            }
+            if (!processed_any and self.encoder_active.load(.acquire)) {
+                if (self.frame_ready_event) |ev| {
+                    _ = WaitForSingleObject(ev, 8);
+                } else {
+                    clock.sleepMs(1);
+                }
             }
         }
 
@@ -446,6 +509,8 @@ pub const Pipeline = struct {
     }
 
     fn audioWorker(self: *Pipeline) void {
+        const mmcss = enterMmcss("Pro Audio");
+        defer leaveMmcss(mmcss);
         _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 
         var sources: [MAX_AUDIO_SOURCES]AudioSource = .{
@@ -542,6 +607,8 @@ pub const Pipeline = struct {
         var chunk_src: [MAX_AUDIO_SOURCES][2048]f32 = undefined;
         var chunk_mix: [2048]f32 = undefined;
 
+        var prev_audio_cfg = self.cfg.audio;
+
         while (self.audio_active.load(.acquire)) {
             var did_read = false;
             const now_ns = clock.MonotonicClock.nowNanos();
@@ -549,10 +616,28 @@ pub const Pipeline = struct {
             const expected_frames = (elapsed_ns * sample_rate) / std.time.ns_per_s;
             const max_allowed_frames = expected_frames + 4800;
 
-            sources[0].volume = self.cfg.audio.system_audio_volume;
-            sources[1].volume = self.cfg.audio.system_audio2_volume;
-            sources[2].volume = self.cfg.audio.mic_volume;
-            sources[3].volume = self.cfg.audio.mic2_volume;
+            const cur_audio_cfg = self.cfg.audio;
+            const dsp_changed = (cur_audio_cfg.mic_noise_suppression != prev_audio_cfg.mic_noise_suppression) or
+                (cur_audio_cfg.mic_ns_strength != prev_audio_cfg.mic_ns_strength) or
+                (cur_audio_cfg.mic_compressor != prev_audio_cfg.mic_compressor) or
+                (cur_audio_cfg.mic_comp_amount != prev_audio_cfg.mic_comp_amount) or
+                (cur_audio_cfg.mic_gain_db != prev_audio_cfg.mic_gain_db) or
+                (cur_audio_cfg.mic_volume != prev_audio_cfg.mic_volume) or
+                (cur_audio_cfg.mic2_volume != prev_audio_cfg.mic2_volume) or
+                (cur_audio_cfg.sys_clarity_filter != prev_audio_cfg.sys_clarity_filter) or
+                (cur_audio_cfg.sys_compressor != prev_audio_cfg.sys_compressor) or
+                (cur_audio_cfg.sys_comp_amount != prev_audio_cfg.sys_comp_amount) or
+                (cur_audio_cfg.sys_gain_db != prev_audio_cfg.sys_gain_db) or
+                (cur_audio_cfg.system_audio_volume != prev_audio_cfg.system_audio_volume) or
+                (cur_audio_cfg.system_audio2_volume != prev_audio_cfg.system_audio2_volume);
+            if (dsp_changed) {
+                prev_audio_cfg = cur_audio_cfg;
+            }
+
+            sources[0].volume = cur_audio_cfg.system_audio_volume;
+            sources[1].volume = cur_audio_cfg.system_audio2_volume;
+            sources[2].volume = cur_audio_cfg.mic_volume;
+            sources[3].volume = cur_audio_cfg.mic2_volume;
 
             var sys_peak: f32 = 0.0;
             var mic_peak: f32 = 0.0;
@@ -565,25 +650,29 @@ pub const Pipeline = struct {
                 did_read = true;
 
                 if (src.is_mic) {
-                    src.dsp.configureMicChain(
-                        @floatFromInt(capture.sample_rate),
-                        self.cfg.audio.mic_noise_suppression,
-                        self.cfg.audio.mic_ns_strength,
-                        self.cfg.audio.mic_compressor,
-                        self.cfg.audio.mic_comp_amount,
-                        self.cfg.audio.mic_gain_db,
-                        src.volume,
-                    );
+                    if (dsp_changed) {
+                        src.dsp.configureMicChain(
+                            @floatFromInt(capture.sample_rate),
+                            cur_audio_cfg.mic_noise_suppression,
+                            cur_audio_cfg.mic_ns_strength,
+                            cur_audio_cfg.mic_compressor,
+                            cur_audio_cfg.mic_comp_amount,
+                            cur_audio_cfg.mic_gain_db,
+                            src.volume,
+                        );
+                    }
                     src.dsp.processBuffer(src.buffer[0..raw_count], 2);
                 } else {
-                    src.sys_dsp.configureSystemChain(
-                        @floatFromInt(capture.sample_rate),
-                        self.cfg.audio.sys_clarity_filter,
-                        self.cfg.audio.sys_compressor,
-                        self.cfg.audio.sys_comp_amount,
-                        self.cfg.audio.sys_gain_db,
-                        src.volume,
-                    );
+                    if (dsp_changed) {
+                        src.sys_dsp.configureSystemChain(
+                            @floatFromInt(capture.sample_rate),
+                            cur_audio_cfg.sys_clarity_filter,
+                            cur_audio_cfg.sys_compressor,
+                            cur_audio_cfg.sys_comp_amount,
+                            cur_audio_cfg.sys_gain_db,
+                            src.volume,
+                        );
+                    }
                     src.sys_dsp.processBuffer(src.buffer[0..raw_count], 2);
                 }
 

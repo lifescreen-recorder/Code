@@ -365,6 +365,11 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
         .capture_cursor = true,
     };
     var last_preview_ms: u64 = 0;
+    var last_meter_poll_ms: u64 = 0;
+    var cached_idle_sys_peak: f32 = 0.0;
+    var cached_idle_mic_peak: f32 = 0.0;
+    var cached_idle_sys2_peak: f32 = 0.0;
+    var cached_idle_mic2_peak: f32 = 0.0;
     defer if (preview_backend) |*pb| pb.deinit();
 
     const start_time = clock.MonotonicClock.nowNanos() / 1_000_000;
@@ -817,44 +822,44 @@ pub fn runUi(allocator: std.mem.Allocator, cfg: config.Config, headless_test_ms:
         ui_state.encoded_frames = snap.encoded_frames;
         ui_state.dropped_frames = snap.dropped_frames;
 
-        // Live real-time VU audio meters
+        const should_poll_idle_meters = (snap.state != .recording) and (now_ms - last_meter_poll_ms >= 66);
+        if (should_poll_idle_meters) {
+            last_meter_poll_ms = now_ms;
+            if (ui_state.record_system_audio) {
+                cached_idle_sys_peak = wasapi.getDevicePeak(0, @intCast(ui_state.selected_audio_output));
+            }
+            if (ui_state.record_microphone) {
+                cached_idle_mic_peak = wasapi.getDevicePeak(1, @intCast(ui_state.selected_audio_input));
+            }
+            if (ui_state.record_system_audio2) {
+                cached_idle_sys2_peak = wasapi.getDevicePeak(0, @intCast(ui_state.selected_audio_output2));
+            }
+            if (ui_state.record_microphone2) {
+                cached_idle_mic2_peak = wasapi.getDevicePeak(1, @intCast(ui_state.selected_audio_input2));
+            }
+        }
+
         var sys_peak: f32 = 0.0;
         if (ui_state.record_system_audio) {
-            if (snap.state == .recording) {
-                sys_peak = snap.audio_peak_system;
-            } else {
-                sys_peak = wasapi.getDevicePeak(0, @intCast(ui_state.selected_audio_output));
-            }
+            sys_peak = if (snap.state == .recording) snap.audio_peak_system else cached_idle_sys_peak;
         }
         ui_state.sys_audio_level = @min(1.0, sys_peak * ui_state.system_volume);
 
         var mic_peak: f32 = 0.0;
         if (ui_state.record_microphone) {
-            if (snap.state == .recording) {
-                mic_peak = snap.audio_peak_mic;
-            } else {
-                mic_peak = wasapi.getDevicePeak(1, @intCast(ui_state.selected_audio_input));
-            }
+            mic_peak = if (snap.state == .recording) snap.audio_peak_mic else cached_idle_mic_peak;
         }
         ui_state.mic_audio_level = @min(1.0, mic_peak * ui_state.mic_volume);
 
         var sys2_peak: f32 = 0.0;
         if (ui_state.record_system_audio2) {
-            if (snap.state == .recording) {
-                sys2_peak = snap.audio_peak_system;
-            } else {
-                sys2_peak = wasapi.getDevicePeak(0, @intCast(ui_state.selected_audio_output2));
-            }
+            sys2_peak = if (snap.state == .recording) snap.audio_peak_system else cached_idle_sys2_peak;
         }
         ui_state.sys_audio_level2 = @min(1.0, sys2_peak * ui_state.system_volume2);
 
         var mic2_peak: f32 = 0.0;
         if (ui_state.record_microphone2) {
-            if (snap.state == .recording) {
-                mic2_peak = snap.audio_peak_mic;
-            } else {
-                mic2_peak = wasapi.getDevicePeak(1, @intCast(ui_state.selected_audio_input2));
-            }
+            mic2_peak = if (snap.state == .recording) snap.audio_peak_mic else cached_idle_mic2_peak;
         }
         ui_state.mic_audio_level2 = @min(1.0, mic2_peak * ui_state.mic_volume2);
 

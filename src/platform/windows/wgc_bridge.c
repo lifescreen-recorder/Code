@@ -290,10 +290,8 @@ static WgcCapture* wgc_create_internal(IGraphicsCaptureItem *item, void* d3d_dev
         return NULL;
     }
 
-    // Create FreeThreaded frame pool (DirectXPixelFormat_B8G8R8A8UIntNormalized = 87)
-    // Use 4 buffers so WGC never stalls the application or DWM compositor!
     IDirect3D11CaptureFramePool *framePool = NULL;
-    hr = poolStatics->lpVtbl->CreateFreeThreaded(poolStatics, winrt_device, 87, 2, item_size, (void**)&framePool);
+    hr = poolStatics->lpVtbl->CreateFreeThreaded(poolStatics, winrt_device, 87, 3, item_size, (void**)&framePool);
     poolStatics->lpVtbl->base.Release((IInspectable_Local*)poolStatics);
     if (FAILED(hr) || !framePool) {
         fprintf(stderr, "[WGC] CreateFreeThreaded failed: 0x%08X (size: %dx%d)\n", (unsigned int)hr, (int)item_size.Width, (int)item_size.Height);
@@ -429,7 +427,7 @@ bool wgc_capture_acquire_frame(WgcCapture* cap, void* dest_texture, uint32_t tim
     IDirect3D11CaptureFrame *frame = NULL;
     HRESULT hr = cap->frame_pool->lpVtbl->TryGetNextFrame(cap->frame_pool, (void**)&frame);
     if (FAILED(hr) || !frame) {
-        if (timeout_ms == 0) return false;
+        if (timeout_ms <= 1) return false;
 
         LARGE_INTEGER freq, start, now;
         QueryPerformanceFrequency(&freq);
@@ -438,7 +436,7 @@ bool wgc_capture_acquire_frame(WgcCapture* cap, void* dest_texture, uint32_t tim
         while (1) {
             QueryPerformanceCounter(&now);
             if (now.QuadPart - start.QuadPart >= timeout_ticks) break;
-            Sleep(0); // Yield CPU slice without sleeping 1-2 ms
+            Sleep(1);
             hr = cap->frame_pool->lpVtbl->TryGetNextFrame(cap->frame_pool, (void**)&frame);
             if (SUCCEEDED(hr) && frame) break;
         }
@@ -465,8 +463,8 @@ bool wgc_capture_acquire_frame(WgcCapture* cap, void* dest_texture, uint32_t tim
             HRESULT recreate_hr = cap->frame_pool->lpVtbl->Recreate(
                 cap->frame_pool,
                 cap->winrt_device,
-                87, // DirectXPixelFormat_B8G8R8A8UIntNormalized
-                2,
+                87,
+                3,
                 new_size
             );
             if (FAILED(recreate_hr)) {
